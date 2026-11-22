@@ -1,0 +1,12 @@
+[package]
+name = "mmo-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wfo-server"
+path = "src/main.rs"
+
+[dependencies]
+mmo-protocol = { path = "../mmo-protocol" }

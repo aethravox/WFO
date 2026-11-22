@@ -1,0 +1,9 @@
+[package]
+name = "mmo-renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mmo-protocol = { path = "../mmo-protocol" }
+lang = { path = "../../Lang/crates/lang", default-features = false, features = ["macros", "atomics"] }

@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "Lang/crates/lang-translator",
+    "Lang/crates/lang-macros",
+    "Lang/crates/lang-build",
+    "Lang/crates/lang",
+    "crates/mmo-protocol",
+    "crates/mmo-renderer",
+    "crates/mmo-server",
+    "crates/mmo-player",
+    "crates/mmo-wasm",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"

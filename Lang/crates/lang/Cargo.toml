@@ -1,0 +1,20 @@
+[package]
+name = "lang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bare-metal #![no_std] crate that mounts a language-switcher button into any project and offline pre-translates all app text."
+
+[features]
+default = ["macros", "atomics"]
+macros = ["dep:lang-macros"]
+atomics = []
+alloc = ["lang-translator/alloc"]
+std = ["alloc"]
+
+[dependencies]
+lang-translator = { path = "../lang-translator" }
+lang-macros = { path = "../lang-macros", optional = true }
+
+[dev-dependencies]
+lang-build = { path = "../lang-build" }

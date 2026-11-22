@@ -1,0 +1,12 @@
+[package]
+name = "mmo-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mmo-protocol = { path = "../mmo-protocol" }
+mmo-renderer = { path = "../mmo-renderer" }

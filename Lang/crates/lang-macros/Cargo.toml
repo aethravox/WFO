@@ -1,0 +1,12 @@
+[package]
+name = "lang-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Compile-time AST rewriter and project source scanner for lang (zero external dependencies)."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+lang-translator = { path = "../lang-translator", features = ["std"] }

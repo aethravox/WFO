@@ -1,0 +1,9 @@
+[package]
+name = "lang-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Build-script helper for lang that scans project sources at build time and pre-generates a static no_std LangCatalog."
+
+[dependencies]
+lang-translator = { path = "../lang-translator", features = ["std"] }

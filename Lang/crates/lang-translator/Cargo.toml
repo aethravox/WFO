@@ -1,0 +1,11 @@
+[package]
+name = "lang-translator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Offline zero-dependency multi-language translator engine for lang (no_std compatible)."
+
+[features]
+default = []
+alloc = []
+std = ["alloc"]

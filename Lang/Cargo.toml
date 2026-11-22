@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/lang-translator",
+    "crates/lang-macros",
+    "crates/lang-build",
+    "crates/lang",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
