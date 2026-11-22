@@ -19,7 +19,12 @@ pub struct Rect {
 impl Rect {
     #[inline]
     pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     #[inline]
@@ -115,8 +120,14 @@ impl<'a> ButtonView<'a> {
     /// Recommended minimum width in pixels for the rendered `label` text.
     #[inline]
     pub const fn suggested_width(&self) -> u32 {
-        let approx = (self.label.len() as u32).saturating_mul(8).saturating_add(24);
-        if approx < 48 { 48 } else { approx }
+        let approx = (self.label.len() as u32)
+            .saturating_mul(8)
+            .saturating_add(24);
+        if approx < 48 {
+            48
+        } else {
+            approx
+        }
     }
 
     /// Helper geometry for dropdown option `index` placed stacked directly under `bounds`.
@@ -233,10 +244,7 @@ impl LangButton {
         } else {
             config.languages
         };
-        let active_index = langs
-            .iter()
-            .position(|&l| l == initial_lang)
-            .unwrap_or(0);
+        let active_index = langs.iter().position(|&l| l == initial_lang).unwrap_or(0);
         Self {
             config: ButtonConfig {
                 languages: langs,

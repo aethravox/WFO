@@ -16,6 +16,18 @@ impl MmoClientEngine {
             lobby_name: String::from("Wayfarer"),
             lobby_class: ClassId::Vanguard,
             lobby_focus_name: false,
+            auth_username: String::new(),
+            auth_password: String::new(),
+            auth_status: String::from("Conectando al servidor seguro..."),
+            auth_connected: false,
+            account_authenticated: false,
+            offline_mode: false,
+            offline_level: 1,
+            offline_xp: 0,
+            offline_xp_next: 100,
+            offline_gold: 0,
+            auth_panel_open: true,
+            auth_password_focus: false,
             players: BTreeMap::new(),
             mobs: BTreeMap::new(),
             crystals: BTreeMap::new(),
@@ -51,6 +63,10 @@ impl MmoClientEngine {
             popups: Vec::new(),
             outbox: Vec::new(),
             touch_mode: false,
+            offline_mob_respawns: BTreeMap::new(),
+            offline_mob_attack_timers: BTreeMap::new(),
+            offline_crystal_respawns: BTreeMap::new(),
+            offline_regen_at: 0.0,
         }
     }
 
@@ -61,9 +77,24 @@ impl MmoClientEngine {
         self.lang.set_slot(Rect::new(w as i32 - 86, 16, 70, 30));
     }
 
+    pub fn auth_panel_layout(&self) -> (i32, i32, i32) {
+        let width = (self.fb.width as i32 - 16).min(320);
+        let height = 128;
+        (
+            (self.fb.width as i32 - width) / 2,
+            (self.fb.height as i32 - height) / 2,
+            width,
+        )
+    }
+
     pub fn apply_lan_packet(&mut self, pkt: LanPacket) {
         match pkt {
-            LanPacket::Announce { peer_id, name, udp_port, address } => {
+            LanPacket::Announce {
+                peer_id,
+                name,
+                udp_port,
+                address,
+            } => {
                 if let Some(peer) = self.lan_peers.iter_mut().find(|p| p.id == peer_id) {
                     peer.name = name;
                     peer.address = address;
@@ -86,7 +117,10 @@ impl MmoClientEngine {
                 self.lan_remote_skill = None;
                 self.lan_remote_skill = None;
                 self.lan_outbox.push(LanPacket::Accept {
-                    from_id: self.self_id.clone().unwrap_or_else(|| String::from("lan_local")),
+                    from_id: self
+                        .self_id
+                        .clone()
+                        .unwrap_or_else(|| String::from("lan_local")),
                 });
                 let _ = from_name;
             }
@@ -98,7 +132,11 @@ impl MmoClientEngine {
                 self.lan_pending_skill = None;
                 self.lan_remote_skill = None;
             }
-            LanPacket::Action { from_id, round, skill } => {
+            LanPacket::Action {
+                from_id,
+                round,
+                skill,
+            } => {
                 if self.lan_duel_opponent.as_deref() != Some(from_id.as_str()) {
                     return;
                 }
@@ -140,7 +178,10 @@ impl MmoClientEngine {
         if peer.is_none() {
             return;
         }
-        let from_id = self.self_id.clone().unwrap_or_else(|| String::from("lan_local"));
+        let from_id = self
+            .self_id
+            .clone()
+            .unwrap_or_else(|| String::from("lan_local"));
         self.lan_duel_opponent = Some(peer_id.to_string());
         self.lan_duel_wins = 0;
         self.lan_duel_opponent_wins = 0;
@@ -157,7 +198,10 @@ impl MmoClientEngine {
             if self.lan_pending_skill.is_none() {
                 self.lan_pending_skill = Some(skill);
                 self.lan_outbox.push(LanPacket::Action {
-                    from_id: self.self_id.clone().unwrap_or_else(|| String::from("lan_local")),
+                    from_id: self
+                        .self_id
+                        .clone()
+                        .unwrap_or_else(|| String::from("lan_local")),
                     round: self.lan_duel_round,
                     skill,
                 });
@@ -171,6 +215,54 @@ impl MmoClientEngine {
 
     pub fn apply_server_packet(&mut self, pkt: ServerPacket) {
         match pkt {
+            ServerPacket::AuthRequired => {
+                self.auth_connected = true;
+                self.auth_status = String::from("Servidor seguro conectado.");
+            }
+            ServerPacket::ConnectionStatus { connected } => {
+                self.auth_connected = connected;
+                if connected {
+                    if !self.account_authenticated {
+                        self.auth_panel_open = true;
+                        self.auth_status = String::from("Servidor seguro conectado.");
+                    }
+                } else {
+                    let had_session = self.account_authenticated || self.auth_connected;
+                    self.account_authenticated = false;
+                    self.auth_password.clear();
+                    self.lobby_server_ready = false;
+                    self.joined = false;
+                    self.self_id = None;
+                    self.players.clear();
+                    self.mobs.clear();
+                    self.crystals.clear();
+                    self.offline_mode = had_session;
+                    self.auth_panel_open = !had_session;
+                    self.auth_status = if had_session {
+                        String::from("Desconectado: perfil local, sin sincronización.")
+                    } else {
+                        String::from("Sin conexión TLS; comprueba servidor y certificado.")
+                    };
+                }
+            }
+            ServerPacket::AuthSuccess {
+                username, class_id, ..
+            } => {
+                self.account_authenticated = true;
+                self.offline_mode = false;
+                self.auth_panel_open = false;
+                self.lobby_name = username.clone();
+                self.auth_username = username.clone();
+                self.auth_password.clear();
+                self.lobby_class = class_id;
+                self.auth_status = String::from("Sesión iniciada.");
+                self.outbox
+                    .push(ClientPacket::EnterLobby { name: username });
+            }
+            ServerPacket::AuthFailure { message } => {
+                self.auth_password.clear();
+                self.auth_status = message;
+            }
             ServerPacket::LobbyInit { self_id, room_id } => {
                 self.self_id = Some(self_id);
                 self.lobby_room_id = room_id;
@@ -320,6 +412,58 @@ impl MmoClientEngine {
         }
     }
 
+    pub fn submit_auth(&mut self, register: bool) {
+        let username = self.auth_username.trim();
+        if !(3..=18).contains(&username.len())
+            || !username
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            self.auth_status = String::from("Usuario: 3-18 caracteres (letras, números o _).");
+            return;
+        }
+        if !(8..=128).contains(&self.auth_password.len())
+            || self
+                .auth_password
+                .chars()
+                .any(|ch| ch.is_control() || ch == '|')
+        {
+            self.auth_status = String::from("Contraseña: mínimo 8 caracteres.");
+            return;
+        }
+        if !self.auth_connected {
+            self.auth_status = String::from("Esperando conexión TLS con el servidor.");
+            return;
+        }
+
+        self.auth_username = username.to_ascii_lowercase();
+        self.lobby_name = self.auth_username.clone();
+        self.auth_status = if register {
+            String::from("Creando cuenta...")
+        } else {
+            String::from("Iniciando sesión...")
+        };
+        let packet = if register {
+            ClientPacket::RegisterAccount {
+                username: self.auth_username.clone(),
+                password: self.auth_password.clone(),
+            }
+        } else {
+            ClientPacket::LoginAccount {
+                username: self.auth_username.clone(),
+                password: self.auth_password.clone(),
+            }
+        };
+        self.outbox.push(packet);
+    }
+
+    pub fn enter_offline_mode(&mut self) {
+        self.offline_mode = true;
+        self.auth_panel_open = false;
+        self.auth_password.clear();
+        self.auth_status = String::from("Modo local: el progreso no se sincroniza.");
+    }
+
     pub fn tick(&mut self, dt: f32) {
         let dt = dt.clamp(0.001, 0.08);
         self.elapsed += dt;
@@ -371,7 +515,7 @@ impl MmoClientEngine {
             }
             self.local_y = 0.0;
             self.move_net_accum += dt;
-            if self.move_net_accum >= 0.05 {
+            if !self.offline_mode && self.move_net_accum >= 0.05 {
                 self.move_net_accum = 0.0;
                 self.outbox.push(ClientPacket::Move {
                     x: self.local_x,
@@ -448,7 +592,10 @@ impl MmoClientEngine {
             }
 
             self.move_net_accum += dt;
-            if self.move_net_accum >= 0.05 {
+            if self.offline_mode {
+                self.sync_offline_player();
+                self.tick_offline_world();
+            } else if self.move_net_accum >= 0.05 {
                 self.move_net_accum = 0.0;
                 self.outbox.push(ClientPacket::Move {
                     x: self.local_x,
@@ -491,6 +638,10 @@ impl MmoClientEngine {
             1 => 3.0,
             _ => 5.0,
         };
+        if self.offline_mode {
+            self.offline_attack(s_idx as u8);
+            return;
+        }
         let target_id = self.target_mob_id.clone().unwrap_or_default();
         self.outbox.push(ClientPacket::Attack {
             skill: s_idx as u8,
@@ -515,13 +666,20 @@ impl MmoClientEngine {
                     self.outbox.push(ClientPacket::RandomClass);
                     return;
                 }
-                let seed = self.lobby_name.chars().fold(7u32, |acc, ch| acc.wrapping_mul(33).wrapping_add(ch as u32));
+                let seed = self
+                    .lobby_name
+                    .chars()
+                    .fold(7u32, |acc, ch| acc.wrapping_mul(33).wrapping_add(ch as u32));
                 self.lobby_class = match seed % 3 {
                     0 => ClassId::Vanguard,
                     1 => ClassId::Arcanist,
                     _ => ClassId::Ranger,
                 };
             }
+            return;
+        }
+        if self.offline_mode {
+            self.offline_gather();
             return;
         }
         let mut best_id: Option<String> = None;
@@ -554,7 +712,16 @@ impl MmoClientEngine {
         if ch.is_control() {
             return;
         }
-        if !self.joined && self.lobby_invite_focus {
+        if !self.joined && !self.account_authenticated && self.auth_panel_open {
+            if self.auth_password_focus {
+                if self.auth_password.len() < 128 && ch != '|' {
+                    self.auth_password.push(ch);
+                }
+            } else if (ch.is_ascii_alphanumeric() || ch == '_') && self.auth_username.len() < 18 {
+                self.auth_username.push(ch);
+                self.lobby_name = self.auth_username.clone();
+            }
+        } else if !self.joined && self.lobby_invite_focus {
             if self.lobby_invite_input.len() < 24 && ch != '|' {
                 self.lobby_invite_input.push(ch);
             }
@@ -566,7 +733,14 @@ impl MmoClientEngine {
     }
 
     pub fn on_backspace(&mut self) {
-        if !self.joined && self.lobby_invite_focus {
+        if !self.joined && !self.account_authenticated && self.auth_panel_open {
+            if self.auth_password_focus {
+                self.auth_password.pop();
+            } else {
+                self.auth_username.pop();
+                self.lobby_name = self.auth_username.clone();
+            }
+        } else if !self.joined && self.lobby_invite_focus {
             self.lobby_invite_input.pop();
         } else if self.joined && self.chat_focused {
             self.chat_input.pop();
@@ -574,6 +748,14 @@ impl MmoClientEngine {
     }
 
     pub fn on_enter(&mut self) {
+        if !self.joined && !self.account_authenticated && self.auth_panel_open {
+            if self.auth_password_focus {
+                self.submit_auth(false);
+            } else {
+                self.auth_password_focus = true;
+            }
+            return;
+        }
         if !self.joined {
             if self.lobby_invite_focus {
                 let room_id = self.lobby_invite_input.trim().to_string();
@@ -601,6 +783,17 @@ impl MmoClientEngine {
 
     pub fn submit_join(&mut self) {
         if self.connecting {
+            return;
+        }
+        if self.offline_mode {
+            self.start_offline_world();
+            return;
+        }
+        if !self.account_authenticated {
+            if !self.offline_mode {
+                self.auth_panel_open = true;
+                self.auth_status = String::from("Inicia sesión para entrar al mundo online.");
+            }
             return;
         }
         self.connecting = true;
@@ -681,13 +874,54 @@ impl MmoClientEngine {
             }
         }
 
+        if !self.joined && !self.account_authenticated {
+            if self.auth_panel_open {
+                let (panel_x, panel_y, panel_w) = self.auth_panel_layout();
+                if x >= panel_x + 10
+                    && x <= panel_x + panel_w - 10
+                    && y >= panel_y + 32
+                    && y <= panel_y + 54
+                {
+                    self.auth_password_focus = false;
+                } else if x >= panel_x + 10
+                    && x <= panel_x + panel_w - 10
+                    && y >= panel_y + 56
+                    && y <= panel_y + 78
+                {
+                    self.auth_password_focus = true;
+                } else if y >= panel_y + 86 && y <= panel_y + 116 {
+                    let column = ((x - panel_x) * 3 / panel_w).clamp(0, 2);
+                    match column {
+                        0 => self.submit_auth(false),
+                        1 => self.submit_auth(true),
+                        _ => self.enter_offline_mode(),
+                    }
+                }
+                return;
+            }
+            if x >= 16 && x <= 190 && y >= 96 && y <= 124 {
+                self.auth_panel_open = true;
+                self.auth_password_focus = false;
+                return;
+            }
+        }
+
         // Virtual Jump button when touch_mode is active in-game
-        if self.joined && self.touch_mode && x >= w - 88 && x <= w - 16 && y >= h - 134 && y <= h - 88 {
+        if self.joined
+            && self.touch_mode
+            && x >= w - 88
+            && x <= w - 16
+            && y >= h - 134
+            && y <= h - 88
+        {
             self.trigger_jump();
             return;
         }
 
         if !self.joined {
+            if !self.account_authenticated && self.auth_panel_open {
+                return;
+            }
             let invite_w = if w < 680 { w - 32 } else { 270 };
             let invite_x = if w < 680 { 16 } else { w - 286 };
             let invite_y = if w < 680 { h - 98 } else { 128 };
@@ -696,7 +930,11 @@ impl MmoClientEngine {
                 self.lobby_invite_focus = true;
                 return;
             }
-            if x >= invite_x + input_w && x <= invite_x + invite_w && y >= invite_y && y <= invite_y + 38 {
+            if x >= invite_x + input_w
+                && x <= invite_x + invite_w
+                && y >= invite_y
+                && y <= invite_y + 38
+            {
                 let room_id = self.lobby_invite_input.trim().to_string();
                 if !room_id.is_empty() {
                     self.join_lobby_room(room_id);
@@ -748,9 +986,16 @@ impl MmoClientEngine {
             if !m.alive {
                 continue;
             }
-            let hy = if m.kind == MobKind::Colossus { 2.2 } else { 1.1 };
-            if let Some((sx, sy, _)) = cam.project_point(Vec3::new(m.x, m.y + hy, m.z), self.fb.width, self.fb.height) {
-                let d = sqrt_f32((sx - x as f32) * (sx - x as f32) + (sy - y as f32) * (sy - y as f32));
+            let hy = if m.kind == MobKind::Colossus {
+                2.2
+            } else {
+                1.1
+            };
+            if let Some((sx, sy, _)) =
+                cam.project_point(Vec3::new(m.x, m.y + hy, m.z), self.fb.width, self.fb.height)
+            {
+                let d =
+                    sqrt_f32((sx - x as f32) * (sx - x as f32) + (sy - y as f32) * (sy - y as f32));
                 if d < best_screen_d {
                     best_screen_d = d;
                     clicked_mob = Some(m.id.clone());
@@ -767,7 +1012,9 @@ impl MmoClientEngine {
                             + (p.z - self.local_z) * (p.z - self.local_z),
                     ) < 6.0
             }) {
-                self.outbox.push(ClientPacket::DuelChallenge { target_id: id.clone() });
+                self.outbox.push(ClientPacket::DuelChallenge {
+                    target_id: id.clone(),
+                });
             } else {
                 self.trigger_skill(0);
             }

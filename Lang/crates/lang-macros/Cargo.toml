@@ -2,7 +2,7 @@
 name = "lang-macros"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 description = "Compile-time AST rewriter and project source scanner for lang (zero external dependencies)."
 
 [lib]

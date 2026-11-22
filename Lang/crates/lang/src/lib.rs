@@ -277,14 +277,20 @@ pub fn cycle_language(allowed: &[Language]) -> Language {
 #[cfg(feature = "atomics")]
 #[inline]
 pub fn install_catalog(catalog: &'static LangCatalog) {
-    GLOBAL_CATALOG.store(catalog as *const LangCatalog as *mut LangCatalog, Ordering::Release);
+    GLOBAL_CATALOG.store(
+        catalog as *const LangCatalog as *mut LangCatalog,
+        Ordering::Release,
+    );
 }
 
 /// Register a static [`LangCatalog`] as high-priority custom glossary overrides.
 #[cfg(feature = "atomics")]
 #[inline]
 pub fn install_overrides(overrides: &'static LangCatalog) {
-    GLOBAL_OVERRIDES.store(overrides as *const LangCatalog as *mut LangCatalog, Ordering::Release);
+    GLOBAL_OVERRIDES.store(
+        overrides as *const LangCatalog as *mut LangCatalog,
+        Ordering::Release,
+    );
 }
 
 /// Select the string variant matching the current global language.

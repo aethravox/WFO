@@ -26,7 +26,8 @@ pub fn generate_catalog_from_dir(dir: &Path) {
     let mut texts = Vec::new();
     collect_rs_files(dir, &mut texts);
 
-    let mut by_hash: BTreeMap<u64, (String, [String; lang_translator::Language::COUNT])> = BTreeMap::new();
+    let mut by_hash: BTreeMap<u64, (String, [String; lang_translator::Language::COUNT])> =
+        BTreeMap::new();
     for s in texts {
         let h = lang_translator::fnv1a_64(s.as_bytes());
         by_hash.entry(h).or_insert_with(|| {
@@ -35,7 +36,9 @@ pub fn generate_catalog_from_dir(dir: &Path) {
         });
     }
 
-    let mut code = String::from("pub static LANG_CATALOG: ::lang::LangCatalog = ::lang::LangCatalog::new(&[\n");
+    let mut code = String::from(
+        "pub static LANG_CATALOG: ::lang::LangCatalog = ::lang::LangCatalog::new(&[\n",
+    );
     for (hash, (orig, trans)) in by_hash {
         code.push_str("    ::lang::CatalogEntry::new(");
         code.push_str(&format!("{hash}u64, "));
@@ -184,14 +187,38 @@ fn parse_quoted(src: &str, quote_pos: usize) -> (String, usize) {
         }
         if b == b'\\' && i + 1 < len {
             match bytes[i + 1] {
-                b'n' => { out.push('\n'); i += 2; }
-                b'r' => { out.push('\r'); i += 2; }
-                b't' => { out.push('\t'); i += 2; }
-                b'\\' => { out.push('\\'); i += 2; }
-                b'"' => { out.push('"'); i += 2; }
-                b'\'' => { out.push('\''); i += 2; }
-                b'0' => { out.push('\0'); i += 2; }
-                other => { out.push(other as char); i += 2; }
+                b'n' => {
+                    out.push('\n');
+                    i += 2;
+                }
+                b'r' => {
+                    out.push('\r');
+                    i += 2;
+                }
+                b't' => {
+                    out.push('\t');
+                    i += 2;
+                }
+                b'\\' => {
+                    out.push('\\');
+                    i += 2;
+                }
+                b'"' => {
+                    out.push('"');
+                    i += 2;
+                }
+                b'\'' => {
+                    out.push('\'');
+                    i += 2;
+                }
+                b'0' => {
+                    out.push('\0');
+                    i += 2;
+                }
+                other => {
+                    out.push(other as char);
+                    i += 2;
+                }
             }
             continue;
         }

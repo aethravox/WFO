@@ -1,53 +1,38 @@
+mod accounts;
 mod ws_http;
 
+use accounts::{Account, AccountStore, AuthError};
 use mmo_protocol::{
-    atan2_approx, cos_approx, ground_height_at, sanitize_field, sin_approx, sqrt_f32,
-    ChatEntry, ClassId, ClientPacket, CombatFx, CrystalSnapshot, MobKind, MobSnapshot,
-    PlayerSnapshot, ServerPacket, PLAYABLE_RADIUS, SAFE_PLAZA_RADIUS,
+    atan2_approx, cos_approx, ground_height_at, sanitize_field, sin_approx, sqrt_f32, ChatEntry,
+    ClassId, ClientPacket, CombatFx, CrystalSnapshot, MobKind, MobSnapshot, PlayerSnapshot,
+    ServerPacket, PLAYABLE_RADIUS, SAFE_PLAZA_RADIUS,
 };
+use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use ws_http::{
-    read_ws_frame, write_ws_pong, write_ws_text_frame, ws_accept_key, WsFrame,
-};
+use ws_http::{read_ws_frame, write_ws_pong, write_ws_text_frame, ws_accept_key, WsFrame};
 
 #[derive(Clone)]
-enum ClientSink {
-    Tcp(Arc<Mutex<TcpStream>>),
-    Ws(Arc<Mutex<TcpStream>>),
-}
+struct ClientSink(Sender<ServerPacket>);
 
 impl ClientSink {
     fn send_packet(&self, pkt: &ServerPacket) -> bool {
-        let encoded = pkt.encode();
-        match self {
-            Self::Tcp(stream) => {
-                if let Ok(mut s) = stream.lock() {
-                    let line = format!("{}\n", encoded);
-                    s.write_all(line.as_bytes()).is_ok()
-                } else {
-                    false
-                }
-            }
-            Self::Ws(stream) => {
-                if let Ok(mut s) = stream.lock() {
-                    write_ws_text_frame(&mut s, &encoded).is_ok()
-                } else {
-                    false
-                }
-            }
-        }
+        self.0.send(pkt.clone()).is_ok()
     }
 }
 
 struct ServerPlayer {
     snap: PlayerSnapshot,
+    account_id: Option<i64>,
+    authenticated: bool,
+    auth_attempts: u8,
     joined: bool,
     in_lobby: bool,
     room_id: String,
@@ -89,6 +74,7 @@ struct ServerCrystal {
 }
 
 struct WorldState {
+    accounts: Arc<AccountStore>,
     next_id: u64,
     rng_seed: u64,
     players: HashMap<String, ServerPlayer>,
@@ -98,8 +84,9 @@ struct WorldState {
 }
 
 impl WorldState {
-    fn new() -> Self {
+    fn new(accounts: Arc<AccountStore>) -> Self {
         let mut ws = Self {
+            accounts,
             next_id: 1,
             rng_seed: 0x9E37_79B9_7F4A_7C15,
             players: HashMap::new(),
@@ -109,6 +96,98 @@ impl WorldState {
         };
         ws.spawn_entities();
         ws
+    }
+
+    fn complete_auth(&mut self, player_id: &str, result: Result<Account, AuthError>) -> bool {
+        if let Ok(account) = &result {
+            let account_in_use = self
+                .players
+                .iter()
+                .any(|(id, player)| id != player_id && player.account_id == Some(account.id));
+            if account_in_use {
+                if let Some(player) = self.players.get_mut(player_id) {
+                    player.auth_attempts = player.auth_attempts.saturating_add(1);
+                    player.sink.send_packet(&ServerPacket::AuthFailure {
+                        message: String::from("Esta cuenta ya tiene una sesión activa."),
+                    });
+                    return player.auth_attempts < 5;
+                }
+                return false;
+            }
+        }
+        let Some(player) = self.players.get_mut(player_id) else {
+            return false;
+        };
+        if player.authenticated {
+            return true;
+        }
+
+        match result {
+            Ok(account) => {
+                player.authenticated = true;
+                player.account_id = Some(account.id);
+                player.auth_attempts = 0;
+                player.snap.name = account.username.clone();
+                player.snap.class_id = account.class_id;
+                player.snap.level = account.level;
+                player.snap.xp = account.xp;
+                player.snap.xp_next = account.xp_next;
+                player.snap.gold = account.gold;
+                player.snap.max_hp =
+                    account.class_id.base_hp() + (account.level.saturating_sub(1)) * 28;
+                player.snap.hp = player.snap.max_hp;
+                player.snap.max_mp =
+                    account.class_id.base_mp() + (account.level.saturating_sub(1)) * 16;
+                player.snap.mp = player.snap.max_mp;
+                player.sink.send_packet(&ServerPacket::AuthSuccess {
+                    username: account.username,
+                    class_id: account.class_id,
+                    level: account.level,
+                    xp: account.xp,
+                    xp_next: account.xp_next,
+                    gold: account.gold,
+                });
+                true
+            }
+            Err(error) => {
+                if let AuthError::Storage(ref reason) = error {
+                    eprintln!("[wfo-server] Account storage error: {reason}");
+                }
+                player.auth_attempts = player.auth_attempts.saturating_add(1);
+                let message = match error {
+                    AuthError::InvalidInput => "Nombre o contraseña no válidos.",
+                    AuthError::InvalidCredentials => "Usuario o contraseña incorrectos.",
+                    AuthError::RegistrationFailed => "No se pudo crear la cuenta.",
+                    AuthError::Storage(_) => "Error al acceder a las cuentas.",
+                };
+                player.sink.send_packet(&ServerPacket::AuthFailure {
+                    message: message.to_string(),
+                });
+                player.auth_attempts < 5
+            }
+        }
+    }
+
+    fn persist_account(&self, player_id: &str) {
+        let Some(player) = self.players.get(player_id) else {
+            return;
+        };
+        let Some(account_id) = player.account_id else {
+            return;
+        };
+        if let Err(error) = self.accounts.save_progress(
+            account_id,
+            player.snap.class_id,
+            player.snap.level,
+            player.snap.xp,
+            player.snap.xp_next,
+            player.snap.gold,
+        ) {
+            eprintln!(
+                "[wfo-server] Could not persist account {}: {error}",
+                player.snap.name
+            );
+        }
     }
 
     fn next_rand(&mut self) -> f32 {
@@ -126,18 +205,174 @@ impl WorldState {
     fn spawn_entities(&mut self) {
         let now = Instant::now();
         let templates = [
-            (MobKind::Stalker, "Rift Stalker", -32.0f32, 18.0f32, 1, 90, 5.0, 14.0, 2.6, 9, 28, 12),
-            (MobKind::Stalker, "Rift Stalker", -46.0, 4.0, 1, 95, 5.2, 14.0, 2.6, 10, 30, 14),
-            (MobKind::Stalker, "Rift Stalker", -36.0, -22.0, 2, 115, 5.4, 15.0, 2.6, 12, 36, 18),
-            (MobKind::Stalker, "Rift Stalker", -16.0, 38.0, 1, 90, 5.0, 14.0, 2.6, 9, 28, 12),
-            (MobKind::Stalker, "Rift Stalker", 12.0, 44.0, 2, 115, 5.3, 15.0, 2.6, 12, 36, 18),
-            (MobKind::Wisp, "Crystal Wisp", 34.0, 16.0, 2, 105, 4.6, 15.0, 6.0, 11, 34, 20),
-            (MobKind::Wisp, "Crystal Wisp", 50.0, 4.0, 2, 110, 4.8, 15.0, 6.0, 12, 36, 22),
-            (MobKind::Wisp, "Crystal Wisp", 42.0, -18.0, 3, 135, 4.9, 16.0, 6.0, 14, 45, 26),
-            (MobKind::Wisp, "Crystal Wisp", 28.0, -32.0, 3, 135, 4.9, 16.0, 6.0, 14, 45, 26),
-            (MobKind::Sentinel, "Obsidian Sentinel", -18.0, -38.0, 4, 210, 4.0, 15.0, 3.2, 18, 68, 38),
-            (MobKind::Sentinel, "Obsidian Sentinel", 18.0, -40.0, 4, 210, 4.0, 15.0, 3.2, 18, 68, 38),
-            (MobKind::Colossus, "Ancient Colossus", 0.0, -58.0, 6, 620, 3.6, 18.0, 4.5, 28, 240, 140),
+            (
+                MobKind::Stalker,
+                "Rift Stalker",
+                -32.0f32,
+                18.0f32,
+                1,
+                90,
+                5.0,
+                14.0,
+                2.6,
+                9,
+                28,
+                12,
+            ),
+            (
+                MobKind::Stalker,
+                "Rift Stalker",
+                -46.0,
+                4.0,
+                1,
+                95,
+                5.2,
+                14.0,
+                2.6,
+                10,
+                30,
+                14,
+            ),
+            (
+                MobKind::Stalker,
+                "Rift Stalker",
+                -36.0,
+                -22.0,
+                2,
+                115,
+                5.4,
+                15.0,
+                2.6,
+                12,
+                36,
+                18,
+            ),
+            (
+                MobKind::Stalker,
+                "Rift Stalker",
+                -16.0,
+                38.0,
+                1,
+                90,
+                5.0,
+                14.0,
+                2.6,
+                9,
+                28,
+                12,
+            ),
+            (
+                MobKind::Stalker,
+                "Rift Stalker",
+                12.0,
+                44.0,
+                2,
+                115,
+                5.3,
+                15.0,
+                2.6,
+                12,
+                36,
+                18,
+            ),
+            (
+                MobKind::Wisp,
+                "Crystal Wisp",
+                34.0,
+                16.0,
+                2,
+                105,
+                4.6,
+                15.0,
+                6.0,
+                11,
+                34,
+                20,
+            ),
+            (
+                MobKind::Wisp,
+                "Crystal Wisp",
+                50.0,
+                4.0,
+                2,
+                110,
+                4.8,
+                15.0,
+                6.0,
+                12,
+                36,
+                22,
+            ),
+            (
+                MobKind::Wisp,
+                "Crystal Wisp",
+                42.0,
+                -18.0,
+                3,
+                135,
+                4.9,
+                16.0,
+                6.0,
+                14,
+                45,
+                26,
+            ),
+            (
+                MobKind::Wisp,
+                "Crystal Wisp",
+                28.0,
+                -32.0,
+                3,
+                135,
+                4.9,
+                16.0,
+                6.0,
+                14,
+                45,
+                26,
+            ),
+            (
+                MobKind::Sentinel,
+                "Obsidian Sentinel",
+                -18.0,
+                -38.0,
+                4,
+                210,
+                4.0,
+                15.0,
+                3.2,
+                18,
+                68,
+                38,
+            ),
+            (
+                MobKind::Sentinel,
+                "Obsidian Sentinel",
+                18.0,
+                -40.0,
+                4,
+                210,
+                4.0,
+                15.0,
+                3.2,
+                18,
+                68,
+                38,
+            ),
+            (
+                MobKind::Colossus,
+                "Ancient Colossus",
+                0.0,
+                -58.0,
+                6,
+                620,
+                3.6,
+                18.0,
+                4.5,
+                28,
+                240,
+                140,
+            ),
         ];
 
         for (idx, &(kind, name, x, z, level, hp, speed, aggro, atk_r, dmg, xp, gold)) in
@@ -258,17 +493,41 @@ impl WorldState {
                 None,
             );
         }
+        self.persist_account(player_id);
     }
 
     fn handle_packet(&mut self, player_id: &str, pkt: ClientPacket) {
+        if matches!(
+            &pkt,
+            ClientPacket::RegisterAccount { .. } | ClientPacket::LoginAccount { .. }
+        ) {
+            return;
+        }
+        if !self
+            .players
+            .get(player_id)
+            .is_some_and(|player| player.authenticated)
+        {
+            return;
+        }
+
         let now = Instant::now();
         match pkt {
+            ClientPacket::RegisterAccount { .. } | ClientPacket::LoginAccount { .. } => return,
             ClientPacket::DuelChallenge { target_id } => {
-                let target_joined = self.players.get(&target_id).map(|p| p.joined).unwrap_or(false);
+                let target_joined = self
+                    .players
+                    .get(&target_id)
+                    .map(|p| p.joined)
+                    .unwrap_or(false);
                 if !target_joined {
                     return;
                 }
-                let challenger_joined = self.players.get(player_id).map(|p| p.joined).unwrap_or(false);
+                let challenger_joined = self
+                    .players
+                    .get(player_id)
+                    .map(|p| p.joined)
+                    .unwrap_or(false);
                 if !challenger_joined {
                     return;
                 }
@@ -295,7 +554,9 @@ impl WorldState {
                         pending_skill: None,
                     });
                 }
-                if let (Some(a), Some(b)) = (self.players.get(player_id), self.players.get(&target_id)) {
+                if let (Some(a), Some(b)) =
+                    (self.players.get(player_id), self.players.get(&target_id))
+                {
                     let state_a = ServerPacket::DuelState {
                         opponent_id: b.snap.id.clone(),
                         opponent_name: b.snap.name.clone(),
@@ -334,17 +595,23 @@ impl WorldState {
                     }
                 }
 
-                let opponent_ready = self.players.get(&target_id)
+                let opponent_ready = self
+                    .players
+                    .get(&target_id)
                     .and_then(|p| p.duel.as_ref())
                     .and_then(|d| d.pending_skill)
                     .is_some();
-                let own_skill = self.players.get(player_id)
+                let own_skill = self
+                    .players
+                    .get(player_id)
                     .and_then(|p| p.duel.as_ref())
                     .and_then(|d| d.pending_skill);
                 if !opponent_ready {
                     return;
                 }
-                let opponent_skill = self.players.get(&target_id)
+                let opponent_skill = self
+                    .players
+                    .get(&target_id)
                     .and_then(|p| p.duel.as_ref())
                     .and_then(|d| d.pending_skill)
                     .unwrap_or(0);
@@ -356,7 +623,11 @@ impl WorldState {
                     || (own_skill == 1 && opponent_skill == 0)
                     || (own_skill == 2 && opponent_skill == 1)
                 {
-                    let name = self.players.get(player_id).map(|p| p.snap.name.clone()).unwrap_or_default();
+                    let name = self
+                        .players
+                        .get(player_id)
+                        .map(|p| p.snap.name.clone())
+                        .unwrap_or_default();
                     if let Some(p) = self.players.get_mut(player_id) {
                         if let Some(ref mut duel) = p.duel {
                             duel.wins += 1;
@@ -369,7 +640,11 @@ impl WorldState {
                     }
                     name
                 } else {
-                    let name = self.players.get(&target_id).map(|p| p.snap.name.clone()).unwrap_or_default();
+                    let name = self
+                        .players
+                        .get(&target_id)
+                        .map(|p| p.snap.name.clone())
+                        .unwrap_or_default();
                     if let Some(p) = self.players.get_mut(&target_id) {
                         if let Some(ref mut duel) = p.duel {
                             duel.wins += 1;
@@ -399,7 +674,10 @@ impl WorldState {
                 }
 
                 for pid in [player_id, target_id.as_str()] {
-                    if let (Some(p), Some(d)) = (self.players.get(pid), self.players.get(pid).and_then(|p| p.duel.clone())) {
+                    if let (Some(p), Some(d)) = (
+                        self.players.get(pid),
+                        self.players.get(pid).and_then(|p| p.duel.clone()),
+                    ) {
                         let opponent = self.players.get(&d.opponent_id);
                         if let Some(opponent) = opponent {
                             p.sink.send_packet(&ServerPacket::DuelState {
@@ -422,7 +700,11 @@ impl WorldState {
             }
             ClientPacket::EnterLobby { name } => {
                 let clean = sanitize_field(name.trim(), 18);
-                let clean_name = if clean.is_empty() { String::from("Traveler") } else { clean };
+                let clean_name = if clean.is_empty() {
+                    String::from("Traveler")
+                } else {
+                    clean
+                };
                 let room_id = format!("room_{}", player_id);
                 let sink = {
                     let Some(p) = self.players.get_mut(player_id) else {
@@ -452,14 +734,21 @@ impl WorldState {
                     }
                     p.sink.clone()
                 };
-                let room_id = self.players.get(player_id).map(|p| p.room_id.clone()).unwrap_or_default();
+                let room_id = self
+                    .players
+                    .get(player_id)
+                    .map(|p| p.room_id.clone())
+                    .unwrap_or_default();
                 if !room_id.is_empty() {
                     sink.send_packet(&ServerPacket::LobbyInvite { room_id });
                 }
             }
             ClientPacket::JoinLobbyRoom { room_id } => {
                 let clean_room = sanitize_field(room_id.trim(), 24);
-                let exists = self.players.values().any(|p| p.in_lobby && p.room_id == clean_room);
+                let exists = self
+                    .players
+                    .values()
+                    .any(|p| p.in_lobby && p.room_id == clean_room);
                 if !exists {
                     return;
                 }
@@ -483,7 +772,10 @@ impl WorldState {
                         sink.send_packet(&ServerPacket::Player(p.snap.clone()));
                         if id != player_id {
                             p.sink.send_packet(&ServerPacket::Player(
-                                self.players.get(player_id).map(|p| p.snap.clone()).unwrap_or_else(|| p.snap.clone()),
+                                self.players
+                                    .get(player_id)
+                                    .map(|p| p.snap.clone())
+                                    .unwrap_or_else(|| p.snap.clone()),
                             ));
                         }
                     }
@@ -510,6 +802,7 @@ impl WorldState {
                     p.snap.mp = class_id.base_mp();
                     p.sink.clone()
                 };
+                self.persist_account(player_id);
                 sink.send_packet(&ServerPacket::LobbyClass { class_id });
             }
             ClientPacket::EnterWorld => {
@@ -610,7 +903,11 @@ impl WorldState {
                             player.snap.yaw = yaw;
                             player.snap.moving = moving;
                         }
-                        let room_id = self.players.get(player_id).map(|p| p.room_id.clone()).unwrap_or_default();
+                        let room_id = self
+                            .players
+                            .get(player_id)
+                            .map(|p| p.room_id.clone())
+                            .unwrap_or_default();
                         let snap = self.players.get(player_id).map(|p| p.snap.clone());
                         if let (false, Some(snap)) = (room_id.is_empty(), snap) {
                             self.broadcast_lobby(&room_id, &ServerPacket::Player(snap), None);
@@ -784,7 +1081,12 @@ impl WorldState {
                 for mid in hit_ids.into_iter().take(if is_aoe { 4 } else { 1 }) {
                     let r1 = self.next_rand();
                     let r2 = self.next_rand();
-                    let crit = r1 < if class_id == ClassId::Ranger { 0.28 } else { 0.18 };
+                    let crit = r1
+                        < if class_id == ClassId::Ranger {
+                            0.28
+                        } else {
+                            0.18
+                        };
                     let lvl_bonus = 1.0 + ((level - 1) as f32) * 0.16;
                     let raw = (class_id.base_damage() as f32)
                         * lvl_bonus
@@ -801,7 +1103,11 @@ impl WorldState {
                         if m.snap.hp == 0 {
                             m.snap.alive = false;
                             m.aggro_target = None;
-                            let respawn_secs = if m.snap.kind == MobKind::Colossus { 25 } else { 12 };
+                            let respawn_secs = if m.snap.kind == MobKind::Colossus {
+                                25
+                            } else {
+                                12
+                            };
                             m.respawn_at = now + Duration::from_secs(respawn_secs);
                             xp_gained = m.xp_reward;
                             gold_gained = m.gold_reward;
@@ -811,7 +1117,12 @@ impl WorldState {
                         fx_list.push(CombatFx {
                             attacker_id: player_id.to_string(),
                             x: m.snap.x,
-                            y: m.snap.y + if m.snap.kind == MobKind::Colossus { 3.2 } else { 1.7 },
+                            y: m.snap.y
+                                + if m.snap.kind == MobKind::Colossus {
+                                    3.2
+                                } else {
+                                    1.7
+                                },
                             z: m.snap.z,
                             skill: s_idx as u8,
                             class_id,
@@ -954,14 +1265,23 @@ impl WorldState {
 
             let (mx, mz, anchor_x, anchor_z, aggro_range, current_target) = {
                 let m = self.mobs.get(&mid).unwrap();
-                (m.snap.x, m.snap.z, m.anchor_x, m.anchor_z, m.aggro_range, m.aggro_target.clone())
+                (
+                    m.snap.x,
+                    m.snap.z,
+                    m.anchor_x,
+                    m.anchor_z,
+                    m.aggro_range,
+                    m.aggro_target.clone(),
+                )
             };
 
             let mut target_pos: Option<(String, f32, f32, ClassId)> = None;
             if let Some(tid) = current_target {
                 if let Some(tp) = self.players.get(&tid) {
-                    let in_plaza = sqrt_f32(tp.snap.x * tp.snap.x + tp.snap.z * tp.snap.z) < SAFE_PLAZA_RADIUS;
-                    let leash_d = sqrt_f32((tp.snap.x - anchor_x).powi(2) + (tp.snap.z - anchor_z).powi(2));
+                    let in_plaza =
+                        sqrt_f32(tp.snap.x * tp.snap.x + tp.snap.z * tp.snap.z) < SAFE_PLAZA_RADIUS;
+                    let leash_d =
+                        sqrt_f32((tp.snap.x - anchor_x).powi(2) + (tp.snap.z - anchor_z).powi(2));
                     if tp.joined && !in_plaza && leash_d < 28.0 {
                         target_pos = Some((tid, tp.snap.x, tp.snap.z, tp.snap.class_id));
                     }
@@ -1009,7 +1329,8 @@ impl WorldState {
                             m.last_attack = now;
                             m.snap.attack_tick = m.snap.attack_tick.wrapping_add(1);
                             let dmg = ((m.damage as f32) * (0.85 + rand_hit * 0.3)) as i32;
-                            dealt_damage = Some((tid, dmg, tx, ground_height_at(tx, tz), tz, t_class));
+                            dealt_damage =
+                                Some((tid, dmg, tx, ground_height_at(tx, tz), tz, t_class));
                         }
                     }
                 } else {
@@ -1115,6 +1436,9 @@ fn register_player(state: &Arc<Mutex<WorldState>>, sink: ClientSink) -> String {
                 gold: 0,
                 attack_tick: 0,
             },
+            account_id: None,
+            authenticated: false,
+            auth_attempts: 0,
             joined: false,
             in_lobby: false,
             room_id: String::new(),
@@ -1128,29 +1452,117 @@ fn register_player(state: &Arc<Mutex<WorldState>>, sink: ClientSink) -> String {
 
 fn remove_player(state: &Arc<Mutex<WorldState>>, pid: &str) {
     let mut w = state.lock().unwrap();
+    w.persist_account(pid);
     let was_joined = w.players.remove(pid).map(|p| p.joined).unwrap_or(false);
     if was_joined {
-        w.broadcast(&ServerPacket::PlayerLeft { id: pid.to_string() }, None);
+        w.broadcast(
+            &ServerPacket::PlayerLeft {
+                id: pid.to_string(),
+            },
+            None,
+        );
     }
 }
 
-fn handle_native_tcp_client(stream: TcpStream, state: Arc<Mutex<WorldState>>) {
-    let Ok(read_clone) = stream.try_clone() else {
-        return;
-    };
-    let sink = ClientSink::Tcp(Arc::new(Mutex::new(stream)));
-    let pid = register_player(&state, sink);
-
-    let mut reader = BufReader::new(read_clone);
-    let mut line = String::new();
-    while reader.read_line(&mut line).unwrap_or(0) > 0 {
-        if let Some(pkt) = ClientPacket::decode(&line) {
-            let mut w = state.lock().unwrap();
-            w.handle_packet(&pid, pkt);
+fn handle_client_packet(
+    state: &Arc<Mutex<WorldState>>,
+    accounts: &AccountStore,
+    player_id: &str,
+    packet: ClientPacket,
+) -> bool {
+    let auth_request = match packet {
+        ClientPacket::RegisterAccount { username, password } => Some((username, password, true)),
+        ClientPacket::LoginAccount { username, password } => Some((username, password, false)),
+        other => {
+            if let Ok(mut world) = state.lock() {
+                world.handle_packet(player_id, other);
+            }
+            return true;
         }
-        line.clear();
+    };
+
+    let Some((username, password, register)) = auth_request else {
+        return true;
+    };
+    let result = accounts.authenticate(&username, &password, register);
+    state
+        .lock()
+        .map(|mut world| world.complete_auth(player_id, result))
+        .unwrap_or(false)
+}
+
+fn handle_native_tcp_client(
+    mut stream: StreamOwned<ServerConnection, TcpStream>,
+    state: Arc<Mutex<WorldState>>,
+    accounts: Arc<AccountStore>,
+) {
+    let (out_tx, out_rx): (Sender<ServerPacket>, Receiver<ServerPacket>) = mpsc::channel();
+    let sink = ClientSink(out_tx);
+    let pid = register_player(&state, sink);
+    if let Ok(world) = state.lock() {
+        if let Some(player) = world.players.get(&pid) {
+            player.sink.send_packet(&ServerPacket::AuthRequired);
+        }
+    }
+
+    let mut pending = Vec::new();
+    let mut buf = [0u8; 2048];
+    let mut connected = true;
+    while connected {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => {
+                pending.extend_from_slice(&buf[..read]);
+                if pending.len() > 4096 {
+                    eprintln!("[wfo-server] Closing oversized client packet from {pid}");
+                    break;
+                }
+                while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+                    let line = pending.drain(..=end).collect::<Vec<_>>();
+                    let text = String::from_utf8_lossy(&line);
+                    if let Some(packet) = ClientPacket::decode(&text) {
+                        connected = handle_client_packet(&state, &accounts, &pid, packet);
+                        if !connected {
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => break,
+        }
+
+        while let Ok(packet) = out_rx.try_recv() {
+            if writeln!(stream, "{}", packet.encode()).is_err() {
+                connected = false;
+                break;
+            }
+        }
+        if connected && stream.flush().is_err() {
+            connected = false;
+        }
     }
     remove_player(&state, &pid);
+}
+
+fn load_server_tls_config() -> Result<Arc<ServerConfig>, Box<dyn std::error::Error>> {
+    let cert_path = std::env::var("WFO_TLS_CERT")
+        .map_err(|_| "WFO_TLS_CERT must point to a PEM server certificate")?;
+    let key_path =
+        std::env::var("WFO_TLS_KEY").map_err(|_| "WFO_TLS_KEY must point to a PEM private key")?;
+    let cert_file = fs::File::open(cert_path)?;
+    let certs =
+        rustls_pemfile::certs(&mut BufReader::new(cert_file)).collect::<Result<Vec<_>, _>>()?;
+    let key = rustls_pemfile::private_key(&mut BufReader::new(fs::File::open(key_path)?))?
+        .ok_or("WFO_TLS_KEY contains no supported private key")?;
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    Ok(Arc::new(config))
 }
 
 fn content_type_for(path: &str) -> &'static str {
@@ -1177,7 +1589,12 @@ fn content_type_for(path: &str) -> &'static str {
     }
 }
 
-fn handle_http_or_ws(mut stream: TcpStream, state: Arc<Mutex<WorldState>>) {
+fn handle_http_or_ws<S: Read + Write>(
+    mut stream: S,
+    state: Arc<Mutex<WorldState>>,
+    accounts: Arc<AccountStore>,
+    secure: bool,
+) {
     let mut buf = [0u8; 4096];
     let n = match stream.read(&mut buf) {
         Ok(n) if n > 0 => n,
@@ -1190,53 +1607,84 @@ fn handle_http_or_ws(mut stream: TcpStream, state: Arc<Mutex<WorldState>>) {
     let raw_path = parts.next().unwrap_or("/");
     let path_only = raw_path.split('?').next().unwrap_or("/");
 
-    // Check WebSocket upgrade on /ws
-    let mut ws_key: Option<String> = None;
-    for line in req.lines() {
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("sec-websocket-key") {
-                ws_key = Some(v.trim().to_string());
-            }
-        }
-    }
+    let websocket_key = req.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim()
+            .eq_ignore_ascii_case("sec-websocket-key")
+            .then(|| value.trim().to_string())
+    });
 
     if path_only == "/ws" {
-        if let Some(key) = ws_key {
-            let accept = ws_accept_key(&key);
-            let resp = format!(
-                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
-                accept
-            );
-            if stream.write_all(resp.as_bytes()).is_err() {
-                return;
-            }
-            let Ok(mut read_stream) = stream.try_clone() else {
-                return;
-            };
-            let sink = ClientSink::Ws(Arc::new(Mutex::new(stream)));
-            let pid = register_player(&state, sink.clone());
+        if secure {
+            if let Some(key) = websocket_key {
+                let accept = ws_accept_key(&key);
+                let response = format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                );
+                if stream.write_all(response.as_bytes()).is_err() {
+                    return;
+                }
 
-            loop {
-                match read_ws_frame(&mut read_stream) {
-                    Ok(WsFrame::Text(txt)) => {
-                        if let Some(pkt) = ClientPacket::decode(&txt) {
-                            let mut w = state.lock().unwrap();
-                            w.handle_packet(&pid, pkt);
-                        }
+                let (out_tx, out_rx) = mpsc::channel();
+                let pid = register_player(&state, ClientSink(out_tx));
+                if let Ok(world) = state.lock() {
+                    if let Some(player) = world.players.get(&pid) {
+                        player.sink.send_packet(&ServerPacket::AuthRequired);
                     }
-                    Ok(WsFrame::Ping(p)) => {
-                        if let ClientSink::Ws(ref s) = sink {
-                            if let Ok(mut guard) = s.lock() {
-                                let _ = write_ws_pong(&mut guard, &p);
+                }
+                while let Ok(packet) = out_rx.try_recv() {
+                    if write_ws_text_frame(&mut stream, &packet.encode()).is_err() {
+                        remove_player(&state, &pid);
+                        return;
+                    }
+                }
+                if stream.flush().is_err() {
+                    remove_player(&state, &pid);
+                    return;
+                }
+                loop {
+                    let frame = match read_ws_frame(&mut stream) {
+                        Ok(frame) => frame,
+                        Err(_) => break,
+                    };
+                    match frame {
+                        WsFrame::Text(text) => {
+                            if let Some(packet) = ClientPacket::decode(&text) {
+                                if !handle_client_packet(&state, &accounts, &pid, packet) {
+                                    break;
+                                }
                             }
                         }
+                        WsFrame::Ping(payload) => {
+                            if write_ws_pong(&mut stream, &payload).is_err() {
+                                break;
+                            }
+                        }
+                        WsFrame::Close => break,
                     }
-                    Ok(WsFrame::Close) | Err(_) => break,
+                    while let Ok(packet) = out_rx.try_recv() {
+                        if write_ws_text_frame(&mut stream, &packet.encode()).is_err() {
+                            remove_player(&state, &pid);
+                            return;
+                        }
+                    }
+                    if stream.flush().is_err() {
+                        break;
+                    }
                 }
+                remove_player(&state, &pid);
+                return;
             }
-            remove_player(&state, &pid);
-            return;
         }
+
+        let body = b"WebSocket game connections require TLS.";
+        let response = format!(
+            "HTTP/1.1 426 Upgrade Required\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(body);
+        return;
     }
 
     if method == "GET" && path_only == "/api/world-info" {
@@ -1309,7 +1757,13 @@ fn handle_http_or_ws(mut stream: TcpStream, state: Arc<Mutex<WorldState>>) {
 }
 
 fn main() {
-    let state = Arc::new(Mutex::new(WorldState::new()));
+    let tls_config = load_server_tls_config().expect("configure TLS for online game sessions");
+    let database_path = std::env::var_os("WFO_DB_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("wfo-server.sqlite3"));
+    let accounts =
+        Arc::new(AccountStore::open(&database_path).expect("initialize WFO account database"));
+    let state = Arc::new(Mutex::new(WorldState::new(Arc::clone(&accounts))));
 
     // Simulation tick thread (20 Hz)
     let sim_state = Arc::clone(&state);
@@ -1320,28 +1774,118 @@ fn main() {
         }
     });
 
-    // Native TCP MMO listener (port 7878) for `wfo-player` executables
-    let tcp_addr = std::env::var("WFO_TCP_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:7878"));
-    let tcp_listener = TcpListener::bind(&tcp_addr).expect("bind native MMO TCP port");
-    println!("[wfo-server] Native TCP MMO listening on {}", tcp_addr);
+    // Native TLS MMO listener (port 7878) for `wfo-player` executables.
+    let tcp_addr = std::env::var("WFO_TLS_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:7878"));
+    let tcp_listener = TcpListener::bind(&tcp_addr).expect("bind native MMO TLS port");
+    println!("[wfo-server] Native TLS MMO listening on {}", tcp_addr);
 
     let tcp_state = Arc::clone(&state);
+    let tcp_accounts = Arc::clone(&accounts);
+    let tcp_tls_config = Arc::clone(&tls_config);
     thread::spawn(move || {
         for stream in tcp_listener.incoming().flatten() {
             let _ = stream.set_nodelay(true);
             let st = Arc::clone(&tcp_state);
-            thread::spawn(move || handle_native_tcp_client(stream, st));
+            let account_store = Arc::clone(&tcp_accounts);
+            let config = Arc::clone(&tcp_tls_config);
+            thread::spawn(move || {
+                let connection = match ServerConnection::new(config) {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        eprintln!("[wfo-server] TLS session setup failed: {error}");
+                        return;
+                    }
+                };
+                handle_native_tcp_client(StreamOwned::new(connection, stream), st, account_store);
+            });
         }
     });
 
-    // HTTP + WebSocket Preview listener (port 3000)
+    // Plain HTTP serves only static files and read-only world status (port 3000).
     let web_addr = std::env::var("WFO_WEB_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:3000"));
     let web_listener = TcpListener::bind(&web_addr).expect("bind web preview port");
-    println!("[wfo-server] Web preview HTTP + WS listening on http://{}", web_addr);
+    println!(
+        "[wfo-server] HTTP status/static listener on http://{}",
+        web_addr
+    );
 
-    for stream in web_listener.incoming().flatten() {
+    let web_state = Arc::clone(&state);
+    let web_accounts = Arc::clone(&accounts);
+    thread::spawn(move || {
+        for stream in web_listener.incoming().flatten() {
+            let _ = stream.set_nodelay(true);
+            let st = Arc::clone(&web_state);
+            let account_store = Arc::clone(&web_accounts);
+            thread::spawn(move || handle_http_or_ws(stream, st, account_store, false));
+        }
+    });
+
+    // Secure WebSocket endpoint (WSS) shares the server certificate.
+    let wss_addr = std::env::var("WFO_WSS_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:3443"));
+    let wss_listener = TcpListener::bind(&wss_addr).expect("bind secure WebSocket port");
+    println!(
+        "[wfo-server] Secure WebSocket listener on wss://{}/ws",
+        wss_addr
+    );
+    for stream in wss_listener.incoming().flatten() {
         let _ = stream.set_nodelay(true);
         let st = Arc::clone(&state);
-        thread::spawn(move || handle_http_or_ws(stream, st));
+        let account_store = Arc::clone(&accounts);
+        let config = Arc::clone(&tls_config);
+        thread::spawn(move || {
+            let connection = match ServerConnection::new(config) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    eprintln!("[wfo-server] TLS WebSocket setup failed: {error}");
+                    return;
+                }
+            };
+            handle_http_or_ws(
+                StreamOwned::new(connection, stream),
+                st,
+                account_store,
+                true,
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn account_cannot_be_authenticated_by_two_players() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "wfo-sessions-{}-{nonce}.sqlite3",
+            std::process::id()
+        ));
+        let accounts = Arc::new(AccountStore::open(&path).expect("open test database"));
+        let account = accounts
+            .authenticate("Session_User", "correct horse battery", true)
+            .expect("register test account");
+        let state = Arc::new(Mutex::new(WorldState::new(Arc::clone(&accounts))));
+        let (first_tx, _first_rx) = mpsc::channel();
+        let first = register_player(&state, ClientSink(first_tx));
+        let (second_tx, second_rx) = mpsc::channel();
+        let second = register_player(&state, ClientSink(second_tx));
+
+        {
+            let mut world = state.lock().expect("lock world");
+            assert!(world.complete_auth(&first, Ok(account.clone())));
+            assert!(world.complete_auth(&second, Ok(account.clone())));
+            assert!(world.players[&first].authenticated);
+            assert!(!world.players[&second].authenticated);
+        }
+        let response = second_rx.try_iter().last().expect("authentication failure");
+        assert!(matches!(response, ServerPacket::AuthFailure { .. }));
+
+        drop(accounts);
+        std::fs::remove_file(path).expect("remove test database");
     }
 }

@@ -32,11 +32,7 @@ impl MmoClientEngine {
             Camera::look_at(cam_pos, target, self.fb.width)
         } else {
             let target = Vec3::new(self.local_x, 1.5, self.local_z);
-            let cam_pos = Vec3::new(
-                self.local_x - 10.5,
-                9.0,
-                self.local_z + 12.5,
-            );
+            let cam_pos = Vec3::new(self.local_x - 10.5, 9.0, self.local_z + 12.5);
             Camera::look_at(cam_pos, target, self.fb.width)
         }
     }

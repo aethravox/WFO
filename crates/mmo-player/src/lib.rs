@@ -3,8 +3,8 @@ use android_activity::AndroidApp;
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
-fn android_main(_app: AndroidApp) {
-    main();
+fn android_main(app: AndroidApp) {
+    run(app.internal_data_path());
 }
 
 #[cfg(target_os = "android")]

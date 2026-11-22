@@ -14,9 +14,13 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
+bytemuck = "1"
 mmo-protocol = { path = "../mmo-protocol" }
 mmo-renderer = { path = "../mmo-renderer" }
 pollster = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+webpki-roots = "1"
 wgpu = "27"
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 

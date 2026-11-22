@@ -5,9 +5,10 @@ pub mod font;
 pub mod raster3d;
 
 mod engine;
-mod input;
-mod render;
 mod hud;
+mod input;
+mod offline;
+mod render;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -16,8 +17,9 @@ use alloc::vec::Vec;
 use lang::ui::Rect;
 use mmo_protocol::{
     abs_f32, ceil_f32, clamp_f32, cos_approx, floor_f32, ground_height_at, sin_approx, sqrt_f32,
-    zone_at, ChatEntry, ClassId, ClientPacket, CrystalSnapshot, MmoLangController, MobKind,
-    LanPacket, MobSnapshot, PlayerSnapshot, ServerPacket, ZoneId, PLAYABLE_RADIUS,
+    zone_at, ChatEntry, ClassId, ClientPacket, CombatFx, CrystalSnapshot, LanPacket,
+    MmoLangController, MobKind, MobSnapshot, PlayerSnapshot, ServerPacket, ZoneId, PLAYABLE_RADIUS,
+    SAFE_PLAZA_RADIUS,
 };
 use raster3d::{Camera, Framebuffer, Vec3};
 
@@ -110,6 +112,18 @@ pub struct MmoClientEngine {
     pub lobby_name: String,
     pub lobby_class: ClassId,
     pub lobby_focus_name: bool,
+    pub auth_username: String,
+    pub auth_password: String,
+    pub auth_status: String,
+    pub auth_connected: bool,
+    pub account_authenticated: bool,
+    pub offline_mode: bool,
+    pub offline_level: i32,
+    pub offline_xp: i32,
+    pub offline_xp_next: i32,
+    pub offline_gold: i32,
+    pub auth_panel_open: bool,
+    pub auth_password_focus: bool,
     pub players: BTreeMap<String, PlayerSnapshot>,
     pub mobs: BTreeMap<String, MobSnapshot>,
     pub crystals: BTreeMap<String, CrystalSnapshot>,
@@ -145,5 +159,94 @@ pub struct MmoClientEngine {
     pub popups: Vec<FloatingPopup>,
     pub outbox: Vec<ClientPacket>,
     pub touch_mode: bool,
+    offline_mob_respawns: BTreeMap<String, f32>,
+    offline_mob_attack_timers: BTreeMap<String, f32>,
+    offline_crystal_respawns: BTreeMap<String, f32>,
+    offline_regen_at: f32,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_render_collects_scene_triangles_and_transparent_hud() {
+        let mut engine = MmoClientEngine::new(480, 320);
+        engine.render_gpu();
+
+        assert!(!engine.fb.scene_vertices.is_empty());
+        assert_eq!(engine.fb.scene_vertices.len() % 3, 0);
+        assert!(engine.fb.ui_pixels.iter().any(|pixel| pixel >> 24 != 0));
+        assert_eq!(
+            engine.fb.gpu_background_pixels.len(),
+            engine.fb.pixels.len()
+        );
+        assert_ne!(engine.fb.gpu_background_pixels, engine.fb.pixels);
+    }
+
+    #[test]
+    fn software_render_path_remains_available_for_wasm() {
+        let mut engine = MmoClientEngine::new(480, 320);
+        engine.render();
+
+        assert!(engine.fb.scene_vertices.is_empty());
+        assert!(engine.fb.pixels.iter().any(|pixel| *pixel != 0));
+    }
+
+    #[test]
+    fn gpu_depth_uses_perspective_projection() {
+        let mut framebuffer = Framebuffer::new(100, 100);
+        framebuffer.set_gpu_scene_mode(true);
+        let camera = Camera::look_at(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0), 100);
+        framebuffer.draw_triangle(
+            &camera,
+            Vec3::new(-1.0, -1.0, 2.0),
+            Vec3::new(1.0, -1.0, 2.0),
+            Vec3::new(0.0, 1.0, 2.0),
+            0xFFFFFF,
+            false,
+        );
+
+        assert_eq!(framebuffer.scene_vertices.len(), 3);
+        let expected = 145.0 / 144.65 * (1.0 - 0.35 / 2.0);
+        assert!((framebuffer.scene_vertices[0].position[2] - expected).abs() < 0.0001);
+    }
+
+    #[test]
+    fn offline_world_gathering_updates_progress_without_network_packets() {
+        let mut engine = MmoClientEngine::new(480, 320);
+        engine.offline_mode = true;
+        engine.submit_join();
+        engine.local_x = -26.0;
+        engine.local_z = 26.0;
+        engine.sync_offline_player();
+        engine.trigger_gather();
+
+        assert!(engine.joined);
+        assert!(engine.outbox.is_empty());
+        assert_eq!((engine.offline_xp, engine.offline_gold), (22, 18));
+        assert!(!engine.crystals["local_crystal_5"].available);
+        assert_eq!(engine.players["offline_player"].xp, 22);
+    }
+
+    #[test]
+    fn offline_combat_grants_rewards_without_network_packets() {
+        let mut engine = MmoClientEngine::new(480, 320);
+        engine.offline_mode = true;
+        engine.lobby_class = ClassId::Arcanist;
+        engine.start_offline_world();
+        engine.local_x = -32.0;
+        engine.local_z = 18.0;
+        engine.sync_offline_player();
+        engine.target_mob_id = Some(String::from("local_mob_1"));
+
+        engine.trigger_skill(1);
+        engine.cooldowns[1] = 0.0;
+        engine.trigger_skill(1);
+
+        assert!(engine.outbox.is_empty());
+        assert!(!engine.mobs["local_mob_1"].alive);
+        assert_eq!((engine.offline_xp, engine.offline_gold), (28, 12));
+        assert_eq!(engine.players["offline_player"].level, 1);
+    }
+}

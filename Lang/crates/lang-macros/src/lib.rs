@@ -223,7 +223,9 @@ fn rewrite_item_stream(stream: TokenStream) -> TokenStream {
                         out.push(tokens[i].clone());
                         i += 1;
                     }
-                    TokenTree::Group(g) if g.delimiter() == Delimiter::Brace && angle_depth == 0 => {
+                    TokenTree::Group(g)
+                        if g.delimiter() == Delimiter::Brace && angle_depth == 0 =>
+                    {
                         let rewritten_body = rewrite_expr_stream(g.stream(), false);
                         let mut new_g = Group::new(Delimiter::Brace, rewritten_body);
                         new_g.set_span(g.span());
@@ -378,7 +380,11 @@ fn rewrite_expr_stream(stream: TokenStream, in_match_body: bool) -> TokenStream 
         }
 
         // Detect `=>` ending a match arm pattern
-        if in_match_body && is_punct(&tokens[i], '=') && i + 1 < tokens.len() && is_punct(&tokens[i + 1], '>') {
+        if in_match_body
+            && is_punct(&tokens[i], '=')
+            && i + 1 < tokens.len()
+            && is_punct(&tokens[i + 1], '>')
+        {
             expecting_pattern = false;
             out.push(tokens[i].clone());
             out.push(tokens[i + 1].clone());
@@ -507,7 +513,10 @@ fn rewrite_expr_stream(stream: TokenStream, in_match_body: bool) -> TokenStream 
                         out.push(tokens[i + 2].clone());
                     } else if is_format_macro(&name) {
                         // Keep the format template literal intact; rewrite subsequent args after first `,`
-                        let inner = rewrite_format_macro_args(g.stream(), name == "write" || name == "writeln");
+                        let inner = rewrite_format_macro_args(
+                            g.stream(),
+                            name == "write" || name == "writeln",
+                        );
                         let mut new_g = Group::new(g.delimiter(), inner);
                         new_g.set_span(g.span());
                         out.push(TokenTree::Group(new_g));
@@ -525,7 +534,8 @@ fn rewrite_expr_stream(stream: TokenStream, in_match_body: bool) -> TokenStream 
 
         // Groups (`(...)`, `{...}`, `[...]`)
         if let TokenTree::Group(g) = &tokens[i] {
-            let is_brace_arm_body = in_match_body && !expecting_pattern && g.delimiter() == Delimiter::Brace;
+            let is_brace_arm_body =
+                in_match_body && !expecting_pattern && g.delimiter() == Delimiter::Brace;
             if expecting_pattern {
                 out.push(tokens[i].clone());
             } else {

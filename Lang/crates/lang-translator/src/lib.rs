@@ -397,7 +397,11 @@ fn lookup_word(word: &str, target: Language) -> Option<&'static str> {
 }
 
 fn is_punct_or_space(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '.' | ',' | ':' | ';' | '!' | '?' | '¡' | '¿' | '(' | ')' | '[' | ']' | '-' | '/' | '…')
+    c.is_whitespace()
+        || matches!(
+            c,
+            '.' | ',' | ':' | ';' | '!' | '?' | '¡' | '¿' | '(' | ')' | '[' | ']' | '-' | '/' | '…'
+        )
 }
 
 /// Detect the most likely source language of a UI string.
@@ -568,7 +572,10 @@ pub fn translate_into_writer(input: &str, target: Language, w: &mut BufWriter<'_
     let trailing_punct = &trimmed[core_end..];
     let leading_punct = &trimmed[..core_start];
 
-    let emit_leading_punct = !matches!(target, Language::En | Language::Pt | Language::Fr | Language::De | Language::It);
+    let emit_leading_punct = !matches!(
+        target,
+        Language::En | Language::Pt | Language::Fr | Language::De | Language::It
+    );
     if emit_leading_punct && !leading_punct.is_empty() {
         w.push_str(leading_punct);
     }
@@ -660,10 +667,22 @@ mod tests {
     #[test]
     fn exact_phrase_translation_preserves_casing_and_punct() {
         let mut buf = [0u8; 128];
-        assert_eq!(translate_into_buf("Guardar cambios", Language::En, &mut buf), "Save changes");
-        assert_eq!(translate_into_buf("GUARDAR", Language::En, &mut buf), "SAVE");
-        assert_eq!(translate_into_buf("Cargando...", Language::Fr, &mut buf), "Chargement...");
-        assert_eq!(translate_into_buf("Bienvenido al sistema!", Language::En, &mut buf), "Welcome to the system!");
+        assert_eq!(
+            translate_into_buf("Guardar cambios", Language::En, &mut buf),
+            "Save changes"
+        );
+        assert_eq!(
+            translate_into_buf("GUARDAR", Language::En, &mut buf),
+            "SAVE"
+        );
+        assert_eq!(
+            translate_into_buf("Cargando...", Language::Fr, &mut buf),
+            "Chargement..."
+        );
+        assert_eq!(
+            translate_into_buf("Bienvenido al sistema!", Language::En, &mut buf),
+            "Welcome to the system!"
+        );
     }
 
     #[test]

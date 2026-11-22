@@ -1,4 +1,6 @@
-use lang::ui::{ButtonConfig, ButtonMode, ButtonView, LabelStyle, LangButton, LangHost, Rect, UiEvent};
+use lang::ui::{
+    ButtonConfig, ButtonMode, ButtonView, LabelStyle, LangButton, LangHost, Rect, UiEvent,
+};
 use lang::Language;
 
 struct EmbeddedDisplay {

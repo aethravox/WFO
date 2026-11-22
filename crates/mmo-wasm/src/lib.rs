@@ -144,7 +144,9 @@ pub extern "C" fn wasm_push_server_msg(ptr: *const u8, len: usize) {
 #[no_mangle]
 pub extern "C" fn wasm_is_typing() -> u32 {
     with_engine(0, |eng| {
-        if (!eng.joined && eng.lobby_focus_name) || (eng.joined && eng.chat_focused) {
+        if (!eng.joined && (eng.auth_panel_open || eng.lobby_focus_name))
+            || (eng.joined && eng.chat_focused)
+        {
             1
         } else {
             0
@@ -156,7 +158,8 @@ pub extern "C" fn wasm_is_typing() -> u32 {
 pub extern "C" fn wasm_key(code: u32, down: u32) {
     let pressed = down != 0;
     with_engine((), |eng| {
-        let typing = (!eng.joined && eng.lobby_focus_name) || (eng.joined && eng.chat_focused);
+        let typing = (!eng.joined && (eng.auth_panel_open || eng.lobby_focus_name))
+            || (eng.joined && eng.chat_focused);
         match code {
             1 => eng.input.w = pressed && !typing,
             2 => eng.input.s = pressed && !typing,
@@ -225,4 +228,15 @@ pub extern "C" fn wasm_set_touch_mode(on: u32) {
     with_engine((), |eng| {
         eng.touch_mode = on != 0;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_form_captures_keyboard_input() {
+        wasm_init(320, 240);
+        assert_eq!(wasm_is_typing(), 1);
+    }
 }

@@ -3,6 +3,9 @@ use lang::ui::{
     TextSlots, UiEvent,
 };
 use lang::{CatalogEntry, LangCatalog, LangEngine, Language};
+use std::sync::Mutex;
+
+static GLOBAL_LANGUAGE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Simulated bare-metal framebuffer/UI surface with a ready slot for `LangButton`.
 struct MockBareMetalApp {
@@ -62,6 +65,9 @@ mod app_ui {
 
 #[test]
 fn auto_rewrites_and_button_switches_entire_app_offline() {
+    let _language_guard = GLOBAL_LANGUAGE_LOCK
+        .lock()
+        .expect("lock global language test state");
     lang::set_language(Language::Es);
 
     let mut host = MockBareMetalApp::new();
@@ -161,7 +167,10 @@ fn dropdown_selector_mode_and_geometry() {
     // First tap opens the language selector without changing language yet
     assert!(!btn.handle_event_with_engine(UiEvent::Tap { x: 20, y: 20 }, &mut engine, &mut host));
     assert_eq!(host.button_state, ButtonState::Open);
-    assert_eq!(host.open_options, vec![Language::Es, Language::En, Language::De]);
+    assert_eq!(
+        host.open_options,
+        vec![Language::Es, Language::En, Language::De]
+    );
 
     // Tap 3rd option ("DE"): option 0 is y=40..70, option 1 is y=70..100, option 2 is y=100..130
     assert!(btn.handle_event_with_engine(UiEvent::Tap { x: 20, y: 110 }, &mut engine, &mut host));
@@ -177,12 +186,26 @@ fn engine_and_text_slots_zero_alloc_flow() {
         CatalogEntry::new(
             lang::fnv1a_64(b"Guardar"),
             "Guardar",
-            ["Guardar", "Save", "Salvar", "Enregistrer", "Speichern", "Salva"],
+            [
+                "Guardar",
+                "Save",
+                "Salvar",
+                "Enregistrer",
+                "Speichern",
+                "Salva",
+            ],
         ),
         CatalogEntry::new(
             lang::fnv1a_64(b"Cancelar"),
             "Cancelar",
-            ["Cancelar", "Cancel", "Cancelar", "Annuler", "Abbrechen", "Annulla"],
+            [
+                "Cancelar",
+                "Cancel",
+                "Cancelar",
+                "Annuler",
+                "Abbrechen",
+                "Annulla",
+            ],
         ),
     ]);
 
@@ -202,7 +225,10 @@ fn engine_and_text_slots_zero_alloc_flow() {
 
     // Zero-alloc buffer fallback for dynamic/unlisted phrases
     let mut buf = [0u8; 64];
-    assert_eq!(engine.tr_buf("Error de conexión", &mut buf), "Connection error");
+    assert_eq!(
+        engine.tr_buf("Error de conexión", &mut buf),
+        "Connection error"
+    );
 }
 
 #[test]
@@ -222,6 +248,10 @@ fn scan_project_discovers_texts_at_compile_time() {
 
 #[test]
 fn lang_host_manages_ready_slot_and_retained_texts() {
+    let _language_guard = GLOBAL_LANGUAGE_LOCK
+        .lock()
+        .expect("lock global language test state");
+
     struct RetainedSystem {
         btn_bounds: Rect,
         btn_label: &'static str,

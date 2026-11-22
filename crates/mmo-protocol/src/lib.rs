@@ -4,9 +4,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use lang::ui::{
-    ButtonMode, ButtonView, LabelStyle, LangButton, LangHost, Rect, UiEvent,
-};
+use lang::ui::{ButtonMode, ButtonView, LabelStyle, LangButton, LangHost, Rect, UiEvent};
 use lang::{CatalogEntry, LangCatalog, Language};
 
 pub const PLAYABLE_RADIUS: f32 = 84.0;
@@ -240,6 +238,14 @@ pub enum LanPacket {
 
 #[derive(Debug, Clone)]
 pub enum ClientPacket {
+    RegisterAccount {
+        username: String,
+        password: String,
+    },
+    LoginAccount {
+        username: String,
+        password: String,
+    },
     EnterLobby {
         name: String,
     },
@@ -283,6 +289,21 @@ pub enum ClientPacket {
 
 #[derive(Debug, Clone)]
 pub enum ServerPacket {
+    AuthRequired,
+    ConnectionStatus {
+        connected: bool,
+    },
+    AuthSuccess {
+        username: String,
+        class_id: ClassId,
+        level: i32,
+        xp: i32,
+        xp_next: i32,
+        gold: i32,
+    },
+    AuthFailure {
+        message: String,
+    },
     LobbyInit {
         self_id: String,
         room_id: String,
@@ -306,13 +327,20 @@ pub enum ServerPacket {
         round_active: bool,
         round_winner: String,
     },
-    Init { self_id: String },
+    Init {
+        self_id: String,
+    },
     Player(PlayerSnapshot),
     Mob(MobSnapshot),
     Crystal(CrystalSnapshot),
-    PlayerLeft { id: String },
+    PlayerLeft {
+        id: String,
+    },
     CombatFx(CombatFx),
-    LevelUp { id: String, level: i32 },
+    LevelUp {
+        id: String,
+        level: i32,
+    },
     Chat(ChatEntry),
     SnapshotEnd,
 }
@@ -334,7 +362,12 @@ pub fn sanitize_field(s: &str, max_len: usize) -> String {
 impl LanPacket {
     pub fn encode(&self) -> String {
         match self {
-            Self::Announce { peer_id, name, udp_port, address } => format!(
+            Self::Announce {
+                peer_id,
+                name,
+                udp_port,
+                address,
+            } => format!(
                 "LAN|ANN|{}|{}|{}|{}",
                 sanitize_field(peer_id, 24),
                 sanitize_field(name, 18),
@@ -346,20 +379,18 @@ impl LanPacket {
                 sanitize_field(from_id, 24),
                 sanitize_field(from_name, 18)
             ),
-            Self::Accept { from_id } => format!(
-                "LAN|ACC|{}",
-                sanitize_field(from_id, 24)
-            ),
-            Self::Action { from_id, round, skill } => format!(
+            Self::Accept { from_id } => format!("LAN|ACC|{}", sanitize_field(from_id, 24)),
+            Self::Action {
+                from_id,
+                round,
+                skill,
+            } => format!(
                 "LAN|ACT|{}|{}|{}",
                 sanitize_field(from_id, 24),
                 round,
                 skill
             ),
-            Self::Surrender { from_id } => format!(
-                "LAN|SUR|{}",
-                sanitize_field(from_id, 24)
-            ),
+            Self::Surrender { from_id } => format!("LAN|SUR|{}", sanitize_field(from_id, 24)),
         }
     }
 
@@ -398,6 +429,16 @@ impl LanPacket {
 impl ClientPacket {
     pub fn encode(&self) -> String {
         match self {
+            Self::RegisterAccount { username, password } => format!(
+                "REGISTER|{}|{}",
+                sanitize_field(username, 18),
+                sanitize_field(password, 128)
+            ),
+            Self::LoginAccount { username, password } => format!(
+                "LOGIN|{}|{}",
+                sanitize_field(username, 18),
+                sanitize_field(password, 128)
+            ),
             Self::EnterLobby { name } => {
                 format!("LOBBY|{}", sanitize_field(name, 18))
             }
@@ -446,6 +487,14 @@ impl ClientPacket {
     pub fn decode(line: &str) -> Option<Self> {
         let parts: Vec<&str> = line.trim().split('|').collect();
         match parts.first().copied()? {
+            "REGISTER" if parts.len() == 3 => Some(Self::RegisterAccount {
+                username: sanitize_field(parts[1], 18),
+                password: sanitize_field(parts[2], 128),
+            }),
+            "LOGIN" if parts.len() == 3 => Some(Self::LoginAccount {
+                username: sanitize_field(parts[1], 18),
+                password: sanitize_field(parts[2], 128),
+            }),
             "LOBBY" if parts.len() >= 2 => Some(Self::EnterLobby {
                 name: sanitize_field(parts[1], 18),
             }),
@@ -493,8 +542,35 @@ impl ClientPacket {
 impl ServerPacket {
     pub fn encode(&self) -> String {
         match self {
+            Self::AuthRequired => String::from("AUTHREQ"),
+            Self::ConnectionStatus { connected } => {
+                format!("NET|{}", if *connected { 1 } else { 0 })
+            }
+            Self::AuthSuccess {
+                username,
+                class_id,
+                level,
+                xp,
+                xp_next,
+                gold,
+            } => format!(
+                "AUTHOK|{}|{}|{}|{}|{}|{}",
+                sanitize_field(username, 18),
+                class_id.as_code(),
+                level,
+                xp,
+                xp_next,
+                gold
+            ),
+            Self::AuthFailure { message } => {
+                format!("AUTHERR|{}", sanitize_field(message, 96))
+            }
             Self::LobbyInit { self_id, room_id } => {
-                format!("LOBBYINIT|{}|{}", sanitize_field(self_id, 24), sanitize_field(room_id, 24))
+                format!(
+                    "LOBBYINIT|{}|{}",
+                    sanitize_field(self_id, 24),
+                    sanitize_field(room_id, 24)
+                )
             }
             Self::LobbyInvite { room_id } => {
                 format!("LOBBYINVITE|{}", sanitize_field(room_id, 24))
@@ -598,6 +674,21 @@ impl ServerPacket {
     pub fn decode(line: &str) -> Option<Self> {
         let parts: Vec<&str> = line.trim().split('|').collect();
         match parts.first().copied()? {
+            "AUTHREQ" => Some(Self::AuthRequired),
+            "NET" if parts.len() >= 2 => Some(Self::ConnectionStatus {
+                connected: parts[1] == "1",
+            }),
+            "AUTHOK" if parts.len() >= 7 => Some(Self::AuthSuccess {
+                username: sanitize_field(parts[1], 18),
+                class_id: ClassId::from_str_code(parts[2]),
+                level: parts[3].parse().ok()?,
+                xp: parts[4].parse().ok()?,
+                xp_next: parts[5].parse().ok()?,
+                gold: parts[6].parse().ok()?,
+            }),
+            "AUTHERR" if parts.len() >= 2 => Some(Self::AuthFailure {
+                message: sanitize_field(parts[1], 96),
+            }),
             "LOBBYINIT" if parts.len() >= 3 => Some(Self::LobbyInit {
                 self_id: parts[1].to_string(),
                 room_id: parts[2].to_string(),
@@ -704,8 +795,8 @@ pub fn ground_height_at(x: f32, z: f32) -> f32 {
     }
     let dist = sqrt_f32(dist_sq);
     let blend = clamp_f32((dist - 15.0) / 14.0, 0.0, 1.0);
-    let hill = sin_approx(x * 0.055) * cos_approx(z * 0.055) * 2.4
-        + sin_approx((x + z) * 0.09) * 0.8;
+    let hill =
+        sin_approx(x * 0.055) * cos_approx(z * 0.055) * 2.4 + sin_approx((x + z) * 0.09) * 0.8;
     let rim = if dist > 82.0 {
         let t = (dist - 82.0) / 16.0;
         t * t * 9.0
@@ -728,19 +819,31 @@ pub fn clamp_f32(v: f32, lo: f32, hi: f32) -> f32 {
 
 #[inline]
 pub fn abs_f32(v: f32) -> f32 {
-    if v < 0.0 { -v } else { v }
+    if v < 0.0 {
+        -v
+    } else {
+        v
+    }
 }
 
 #[inline]
 pub fn floor_f32(x: f32) -> i32 {
     let i = x as i32;
-    if (i as f32) > x { i - 1 } else { i }
+    if (i as f32) > x {
+        i - 1
+    } else {
+        i
+    }
 }
 
 #[inline]
 pub fn ceil_f32(x: f32) -> i32 {
     let i = x as i32;
-    if (i as f32) < x { i + 1 } else { i }
+    if (i as f32) < x {
+        i + 1
+    } else {
+        i
+    }
 }
 
 #[inline]
@@ -950,12 +1053,7 @@ pub static MMO_CATALOG: LangCatalog = LangCatalog::new(&[
         lang::fnv1a_64("EN LINEA".as_bytes()),
         "EN LINEA",
         [
-            "EN LINEA",
-            "ONLINE",
-            "ONLINE",
-            "EN LIGNE",
-            "ONLINE",
-            "ONLINE",
+            "EN LINEA", "ONLINE", "ONLINE", "EN LIGNE", "ONLINE", "ONLINE",
         ],
     ),
     CatalogEntry::new(
@@ -1062,5 +1160,52 @@ impl MmoLangController {
 
     pub fn tr_auto_connect(&self) -> &'static str {
         auto_labels::basics()[0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_auth_packets_round_trip_without_exposing_other_fields() {
+        let packet = ClientPacket::RegisterAccount {
+            username: String::from("Player_01"),
+            password: String::from("correct horse battery"),
+        };
+        let encoded = packet.encode();
+        assert!(matches!(
+            ClientPacket::decode(&encoded),
+            Some(ClientPacket::RegisterAccount { username, password })
+                if username == "Player_01" && password == "correct horse battery"
+        ));
+
+        let response = ServerPacket::AuthSuccess {
+            username: String::from("player_01"),
+            class_id: ClassId::Arcanist,
+            level: 4,
+            xp: 25,
+            xp_next: 300,
+            gold: 90,
+        };
+        assert!(matches!(
+            ServerPacket::decode(&response.encode()),
+            Some(ServerPacket::AuthSuccess {
+                username,
+                class_id: ClassId::Arcanist,
+                level: 4,
+                xp: 25,
+                xp_next: 300,
+                gold: 90,
+            }) if username == "player_01"
+        ));
+    }
+
+    #[test]
+    fn server_can_report_secure_connection_state() {
+        assert!(matches!(
+            ServerPacket::decode(&ServerPacket::ConnectionStatus { connected: false }.encode()),
+            Some(ServerPacket::ConnectionStatus { connected: false })
+        ));
     }
 }

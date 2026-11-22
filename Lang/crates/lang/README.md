@@ -2,6 +2,12 @@
 
 > *La apariencia engaña*: `lang` no es un compilador ni un nuevo lenguaje de programación. Es una librería **`#![no_std]` 100% bare-metal** (cero dependencias externas, cero red/Wi-Fi, cero heap obligatorio) que coloca un botón de cambio de idioma en cualquier sitio listo de tu proyecto y pre-traduce automáticamente los textos de la app al compilar.
 
+## Licencia
+
+Los crates de este workspace (`lang`, `lang-macros`, `lang-translator` y
+`lang-build`) se distribuyen bajo MIT o Apache-2.0. Esta licencia aplica solo
+a la biblioteca `Lang/`, no al resto del proyecto WFO.
+
 ## Qué incluye el workspace
 
 - `crates/lang`: Crate principal `#![no_std]` (`LangButton`, `LangHost`, `LangEngine`, `LangCatalog`, `TextSlots<const N>`).

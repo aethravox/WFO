@@ -278,11 +278,14 @@ pub fn try_parse_raw_string(src: &str, r_pos: usize) -> Option<(String, usize)> 
 }
 
 /// Recursively scan a directory of `.rs` files and produce deduplicated, hash-sorted catalog entries.
-pub fn scan_directory_entries(dir: &Path) -> Vec<(u64, String, [String; lang_translator::Language::COUNT])> {
+pub fn scan_directory_entries(
+    dir: &Path,
+) -> Vec<(u64, String, [String; lang_translator::Language::COUNT])> {
     let mut strings = Vec::new();
     collect_rs_files(dir, &mut strings);
 
-    let mut by_hash: BTreeMap<u64, (String, [String; lang_translator::Language::COUNT])> = BTreeMap::new();
+    let mut by_hash: BTreeMap<u64, (String, [String; lang_translator::Language::COUNT])> =
+        BTreeMap::new();
     for s in strings {
         let h = lang_translator::fnv1a_64(s.as_bytes());
         by_hash.entry(h).or_insert_with(|| {
