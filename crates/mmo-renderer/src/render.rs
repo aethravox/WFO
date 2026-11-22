@@ -1,13 +1,70 @@
 use super::*;
 
 impl MmoClientEngine {
+    pub(crate) fn render_lobby_room(&mut self, cam: &Camera) {
+        // A roughly 500 m² anime-style private lodge: 25 m × 20 m.
+        let floor = [
+            Vec3::new(-12.5, 0.0, -10.0),
+            Vec3::new(12.5, 0.0, -10.0),
+            Vec3::new(12.5, 0.0, 10.0),
+            Vec3::new(-12.5, 0.0, 10.0),
+        ];
+        self.fb.draw_quad(cam, floor[0], floor[1], floor[2], floor[3], 0x4C596B, false);
+
+        for x in (-12..=12).step_by(3) {
+            let px = x as f32;
+            self.fb.draw_box(cam, Vec3::new(px, 0.08, 0.0), Vec3::new(0.025, 0.025, 9.8), 0.0, 0x718096, false);
+        }
+        for z in (-9..=9).step_by(3) {
+            let pz = z as f32;
+            self.fb.draw_box(cam, Vec3::new(0.0, 0.08, pz), Vec3::new(12.2, 0.025, 0.025), 0.0, 0x718096, false);
+        }
+
+        // Back and side walls.
+        self.fb.draw_box(cam, Vec3::new(0.0, 3.2, -10.0), Vec3::new(12.7, 3.2, 0.25), 0.0, 0x273449, false);
+        self.fb.draw_box(cam, Vec3::new(-12.5, 3.2, 0.0), Vec3::new(0.25, 3.2, 10.1), 0.0, 0x273449, false);
+        self.fb.draw_box(cam, Vec3::new(12.5, 3.2, 0.0), Vec3::new(0.25, 3.2, 10.1), 0.0, 0x273449, false);
+
+        // World portal at the back.
+        self.fb.draw_box(cam, Vec3::new(-3.8, 3.0, -9.45), Vec3::new(0.45, 3.0, 0.45), 0.0, 0xE8B4D9, false);
+        self.fb.draw_box(cam, Vec3::new(3.8, 3.0, -9.45), Vec3::new(0.45, 3.0, 0.45), 0.0, 0xE8B4D9, false);
+        self.fb.draw_box(cam, Vec3::new(0.0, 5.9, -9.45), Vec3::new(4.2, 0.45, 0.45), 0.0, 0xE8B4D9, false);
+        self.fb.draw_ring_3d(cam, Vec3::new(0.0, 0.16, -9.35), 2.7, 2.95, 0x38BDF8);
+        self.fb.draw_pyramid(cam, Vec3::new(0.0, 3.2, -9.3), 2.1, 4.8, self.elapsed * 0.35, 0x8B5CF6, true);
+
+        // Random-class NPC on the left.
+        self.fb.draw_box(cam, Vec3::new(-9.0, 1.15, 4.0), Vec3::new(0.5, 1.15, 0.5), 0.0, 0xC27824, false);
+        self.fb.draw_box(cam, Vec3::new(-9.0, 2.25, 4.0), Vec3::new(0.35, 0.35, 0.35), 0.0, 0xF4C7A1, false);
+        self.fb.draw_pyramid(cam, Vec3::new(-9.0, 2.55, 4.0), 0.5, 0.7, self.elapsed, 0xF59E0B, true);
+
+        // Storage, chess, and duel arena.
+        self.fb.draw_box(cam, Vec3::new(9.0, 1.1, 4.0), Vec3::new(1.7, 1.1, 0.55), 0.0, 0x6556A0, false);
+        self.fb.draw_box(cam, Vec3::new(-7.0, 0.65, -5.0), Vec3::new(2.0, 0.65, 1.2), 0.0, 0x263348, false);
+        for i in 0..8 {
+            let px = -7.0 - 1.75 + (i as f32 % 2.0) * 3.5;
+            let pz = -5.0 - 1.05 + (i / 2) as f32 * 0.7;
+            self.fb.draw_box(cam, Vec3::new(px, 1.34, pz), Vec3::new(0.28, 0.28, 0.28), 0.0, if i % 2 == 0 { 0xF8FAFC } else { 0x111827 }, false);
+        }
+        self.fb.draw_ring_3d(cam, Vec3::new(8.0, 0.13, -5.0), 3.2, 3.5, 0xEF4444);
+        self.fb.draw_box(cam, Vec3::new(8.0, 1.0, -5.0), Vec3::new(0.35, 1.0, 0.35), 0.0, 0xF97316, true);
+
+        // Friendly display pedestals.
+        for i in 0..4 {
+            let px = -10.5 + i as f32 * 2.2;
+            self.fb.draw_box(cam, Vec3::new(px, 0.55, 8.5), Vec3::new(0.55, 0.55, 0.55), 0.0, 0x334155, false);
+        }
+    }
     pub fn render(&mut self) {
         self.fb.clear_sky();
         let cam = self.current_camera();
 
-        self.render_terrain(&cam);
-        self.render_landmarks(&cam);
-        self.render_forest_and_crystals(&cam);
+        if self.joined {
+            self.render_terrain(&cam);
+            self.render_landmarks(&cam);
+            self.render_forest_and_crystals(&cam);
+        } else {
+            self.render_lobby_room(&cam);
+        }
         self.render_entities(&cam);
         self.render_vfx(&cam);
         self.render_hud(&cam);
@@ -125,6 +182,21 @@ impl MmoClientEngine {
     }
 
     pub(crate) fn render_entities(&mut self, cam: &Camera) {
+        if !self.joined {
+            let walk = if self.local_moving { sin_approx(self.elapsed * 9.0) * 0.16 } else { 0.0 };
+            let px = self.local_x;
+            let py = self.local_y;
+            let pz = self.local_z;
+            let yaw = self.local_yaw;
+            let primary = self.lobby_class.primary_rgb();
+            let accent = self.lobby_class.accent_rgb();
+            self.fb.draw_ring_3d(cam, Vec3::new(px, py + 0.06, pz), 0.72, 0.88, accent);
+            self.fb.draw_box(cam, Vec3::new(px - 0.18, py + 0.42, pz + walk), Vec3::new(0.12, 0.42, 0.13), yaw, 0x334155, false);
+            self.fb.draw_box(cam, Vec3::new(px + 0.18, py + 0.42, pz - walk), Vec3::new(0.12, 0.42, 0.13), yaw, 0x334155, false);
+            self.fb.draw_box(cam, Vec3::new(px, py + 1.2, pz), Vec3::new(0.32, 0.38, 0.22), yaw, primary, false);
+            self.fb.draw_box(cam, Vec3::new(px, py + 1.82, pz), Vec3::new(0.2, 0.2, 0.2), yaw, 0xF4C7A1, false);
+            self.fb.draw_box(cam, Vec3::new(px + 0.42, py + 1.28, pz + 0.28), Vec3::new(0.07, 0.55, 0.07), yaw, accent, true);
+        }
         // Players (Composite 3D Rigs)
         for (id, p) in &self.players {
             let is_self = self.self_id.as_ref() == Some(id);

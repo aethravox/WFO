@@ -1,7 +1,7 @@
-use mmo_protocol::ServerPacket;
+use mmo_protocol::{LanPacket, ServerPacket};
 use mmo_renderer::MmoClientEngine;
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, UdpSocket};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -15,6 +15,66 @@ use winit::window::{Window, WindowId};
 
 mod gpu;
 use gpu::GpuSurface;
+
+const LAN_PORT: u16 = 7889;
+
+struct LanOutbound {
+    packet: LanPacket,
+    address: String,
+    port: u16,
+}
+
+fn spawn_lan_service(tx_in: Sender<LanPacket>) -> Option<Sender<LanOutbound>> {
+    let listener = UdpSocket::bind(("0.0.0.0", LAN_PORT)).ok()?;
+    listener.set_broadcast(true).ok();
+    listener.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    let broadcaster = listener.try_clone().expect("clone LAN duel socket");
+    let outbound = listener.try_clone().expect("clone LAN outbound socket");
+
+    thread::spawn(move || {
+        let peer_id = format!("lan_{}", std::process::id());
+        let name = std::env::var("WFO_LAN_NAME").unwrap_or_else(|_| String::from("Wayfarer LAN"));
+        loop {
+            let packet = LanPacket::Announce {
+                peer_id: peer_id.clone(),
+                name: name.clone(),
+                udp_port: LAN_PORT,
+                address: String::from("255.255.255.255"),
+            };
+            let _ = broadcaster.send_to(packet.encode().as_bytes(), ("255.255.255.255", LAN_PORT));
+            thread::sleep(Duration::from_secs(2));
+        }
+    });
+
+    thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            match listener.recv_from(&mut buf) {
+                Ok((len, source)) => {
+                    if let Some(mut packet) = LanPacket::decode(&String::from_utf8_lossy(&buf[..len])) {
+                        if let LanPacket::Announce { ref mut address, ref mut udp_port, .. } = packet {
+                            *address = source.ip().to_string();
+                            *udp_port = source.port();
+                        }
+                        let _ = tx_in.send(packet);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    });
+
+    let (tx_out, rx_out) = mpsc::channel::<LanOutbound>();
+    thread::spawn(move || {
+        for item in rx_out {
+            let _ = outbound.send_to(
+                item.packet.encode().as_bytes(),
+                (item.address.as_str(), item.port),
+            );
+        }
+    });
+    Some(tx_out)
+}
 
 fn spawn_tcp_client(
     addr: String,
@@ -71,13 +131,20 @@ struct PlayerApp {
     engine: MmoClientEngine,
     rx_in: Receiver<ServerPacket>,
     tx_out: Sender<String>,
+    rx_lan: Receiver<LanPacket>,
+    tx_lan: Option<Sender<LanOutbound>>,
     last_frame: Instant,
     cursor_x: i32,
     cursor_y: i32,
 }
 
 impl PlayerApp {
-    fn new(rx_in: Receiver<ServerPacket>, tx_out: Sender<String>) -> Self {
+    fn new(
+        rx_in: Receiver<ServerPacket>,
+        tx_out: Sender<String>,
+        rx_lan: Receiver<LanPacket>,
+        tx_lan: Option<Sender<LanOutbound>>,
+    ) -> Self {
         #[cfg(target_os = "android")]
         let mut engine = MmoClientEngine::new(960, 600);
         #[cfg(target_os = "android")]
@@ -92,6 +159,8 @@ impl PlayerApp {
             engine,
             rx_in,
             tx_out,
+            rx_lan,
+            tx_lan,
             last_frame: Instant::now(),
             cursor_x: 480,
             cursor_y: 300,
@@ -99,7 +168,7 @@ impl PlayerApp {
     }
 
     fn is_typing(&self) -> bool {
-        (!self.engine.joined && self.engine.lobby_focus_name)
+        (!self.engine.joined && (self.engine.lobby_focus_name || self.engine.lobby_invite_focus))
             || (self.engine.joined && self.engine.chat_focused)
     }
 
@@ -171,6 +240,9 @@ impl PlayerApp {
         while let Ok(pkt) = self.rx_in.try_recv() {
             self.engine.apply_server_packet(pkt);
         }
+        while let Ok(pkt) = self.rx_lan.try_recv() {
+            self.engine.apply_lan_packet(pkt);
+        }
 
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32();
@@ -179,6 +251,19 @@ impl PlayerApp {
         self.engine.tick(dt);
         for pkt in self.engine.outbox.drain(..) {
             let _ = self.tx_out.send(pkt.encode());
+        }
+        for pkt in self.engine.lan_outbox.drain(..) {
+            let peer = self.engine.lan_duel_opponent.as_ref()
+                .and_then(|id| self.engine.lan_peers.iter().find(|p| p.id == *id));
+            if let Some(peer) = peer {
+                if let Some(tx) = &self.tx_lan {
+                    let _ = tx.send(LanOutbound {
+                        packet: pkt,
+                        address: peer.address.clone(),
+                        port: peer.udp_port,
+                    });
+                }
+            }
         }
         self.engine.render();
 
@@ -307,10 +392,12 @@ fn main() {
     };
     let (tx_in, rx_in) = mpsc::channel::<ServerPacket>();
     let (tx_out, rx_out) = mpsc::channel::<String>();
+    let (tx_lan_in, rx_lan) = mpsc::channel::<LanPacket>();
+    let tx_lan = spawn_lan_service(tx_lan_in);
     spawn_tcp_client(server_addr, tx_in, rx_out);
 
     let event_loop = EventLoop::new().expect("create winit event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = PlayerApp::new(rx_in, tx_out);
+    let mut app = PlayerApp::new(rx_in, tx_out, rx_lan, tx_lan);
     event_loop.run_app(&mut app).expect("run native MMO player");
 }

@@ -7,6 +7,10 @@ impl MmoClientEngine {
             fb: Framebuffer::new(width, height),
             lang: MmoLangController::new(slot),
             joined: false,
+            lobby_server_ready: false,
+            lobby_room_id: String::new(),
+            lobby_invite_input: String::new(),
+            lobby_invite_focus: false,
             connecting: false,
             self_id: None,
             lobby_name: String::from("Wayfarer"),
@@ -19,6 +23,16 @@ impl MmoClientEngine {
             chat_input: String::new(),
             chat_focused: false,
             target_mob_id: None,
+            duel: None,
+            lan_mode: false,
+            lan_peers: Vec::new(),
+            lan_duel_opponent: None,
+            lan_pending_skill: None,
+            lan_remote_skill: None,
+            lan_duel_wins: 0,
+            lan_duel_opponent_wins: 0,
+            lan_duel_round: 1,
+            lan_outbox: Vec::new(),
             local_x: 0.0,
             local_y: 0.0,
             local_z: 4.0,
@@ -47,8 +61,158 @@ impl MmoClientEngine {
         self.lang.set_slot(Rect::new(w as i32 - 86, 16, 70, 30));
     }
 
+    pub fn apply_lan_packet(&mut self, pkt: LanPacket) {
+        match pkt {
+            LanPacket::Announce { peer_id, name, udp_port, address } => {
+                if let Some(peer) = self.lan_peers.iter_mut().find(|p| p.id == peer_id) {
+                    peer.name = name;
+                    peer.address = address;
+                    peer.udp_port = udp_port;
+                } else {
+                    self.lan_peers.push(LanPeer {
+                        id: peer_id,
+                        name,
+                        address,
+                        udp_port,
+                    });
+                }
+            }
+            LanPacket::Challenge { from_id, from_name } => {
+                self.lan_duel_opponent = Some(from_id.clone());
+                self.lan_duel_wins = 0;
+                self.lan_duel_opponent_wins = 0;
+                self.lan_duel_round = 1;
+                self.lan_pending_skill = None;
+                self.lan_remote_skill = None;
+                self.lan_remote_skill = None;
+                self.lan_outbox.push(LanPacket::Accept {
+                    from_id: self.self_id.clone().unwrap_or_else(|| String::from("lan_local")),
+                });
+                let _ = from_name;
+            }
+            LanPacket::Accept { from_id } => {
+                self.lan_duel_opponent = Some(from_id);
+                self.lan_duel_wins = 0;
+                self.lan_duel_opponent_wins = 0;
+                self.lan_duel_round = 1;
+                self.lan_pending_skill = None;
+                self.lan_remote_skill = None;
+            }
+            LanPacket::Action { from_id, round, skill } => {
+                if self.lan_duel_opponent.as_deref() != Some(from_id.as_str()) {
+                    return;
+                }
+                if round != self.lan_duel_round {
+                    return;
+                }
+                self.lan_remote_skill = Some(skill);
+                if let (Some(own_skill), Some(opponent_skill)) =
+                    (self.lan_pending_skill, self.lan_remote_skill)
+                {
+                    if own_skill == opponent_skill {
+                    } else if (own_skill == 0 && opponent_skill == 2)
+                        || (own_skill == 1 && opponent_skill == 0)
+                        || (own_skill == 2 && opponent_skill == 1)
+                    {
+                        self.lan_duel_wins += 1;
+                    } else {
+                        self.lan_duel_opponent_wins += 1;
+                    }
+                    self.lan_pending_skill = None;
+                    self.lan_remote_skill = None;
+                    if self.lan_duel_wins < 3 && self.lan_duel_opponent_wins < 3 {
+                        self.lan_duel_round = (self.lan_duel_round + 1).min(5);
+                    }
+                }
+            }
+            LanPacket::Surrender { from_id } => {
+                if self.lan_duel_opponent.as_deref() == Some(from_id.as_str()) {
+                    self.lan_duel_opponent = None;
+                    self.lan_pending_skill = None;
+                    self.lan_remote_skill = None;
+                }
+            }
+        }
+    }
+
+    pub fn challenge_lan_peer(&mut self, peer_id: &str) {
+        let peer = self.lan_peers.iter().find(|p| p.id == peer_id);
+        if peer.is_none() {
+            return;
+        }
+        let from_id = self.self_id.clone().unwrap_or_else(|| String::from("lan_local"));
+        self.lan_duel_opponent = Some(peer_id.to_string());
+        self.lan_duel_wins = 0;
+        self.lan_duel_opponent_wins = 0;
+        self.lan_duel_round = 1;
+        self.lan_pending_skill = None;
+        self.lan_outbox.push(LanPacket::Challenge {
+            from_id,
+            from_name: self.lobby_name.clone(),
+        });
+    }
+
+    pub fn trigger_lan_skill(&mut self, skill: u8) {
+        if self.lan_duel_opponent.is_some() {
+            if self.lan_pending_skill.is_none() {
+                self.lan_pending_skill = Some(skill);
+                self.lan_outbox.push(LanPacket::Action {
+                    from_id: self.self_id.clone().unwrap_or_else(|| String::from("lan_local")),
+                    round: self.lan_duel_round,
+                    skill,
+                });
+            }
+        }
+    }
+
+    pub fn toggle_lan_mode(&mut self) {
+        self.lan_mode = !self.lan_mode;
+    }
+
     pub fn apply_server_packet(&mut self, pkt: ServerPacket) {
         match pkt {
+            ServerPacket::LobbyInit { self_id, room_id } => {
+                self.self_id = Some(self_id);
+                self.lobby_room_id = room_id;
+                self.lobby_server_ready = true;
+                self.connecting = false;
+                self.outbox.push(ClientPacket::CreateInvite);
+            }
+            ServerPacket::LobbyInvite { room_id } => {
+                self.lobby_room_id = room_id;
+            }
+            ServerPacket::LobbyJoined { room_id } => {
+                self.lobby_room_id = room_id;
+            }
+            ServerPacket::LobbyClass { class_id } => {
+                self.lobby_class = class_id;
+            }
+            ServerPacket::WorldEntered => {
+                self.joined = true;
+                self.connecting = false;
+                self.local_x = 0.0;
+                self.local_y = ground_height_at(0.0, 4.0);
+                self.local_z = 4.0;
+            }
+            ServerPacket::DuelState {
+                opponent_id,
+                opponent_name,
+                round,
+                wins,
+                opponent_wins,
+                round_active,
+                round_winner,
+            } => {
+                self.duel = Some(DuelUiState {
+                    opponent_id,
+                    opponent_name,
+                    round,
+                    wins,
+                    opponent_wins,
+                    round_active,
+                    round_winner,
+                });
+            }
             ServerPacket::Init { self_id } => {
                 self.self_id = Some(self_id);
                 self.joined = true;
@@ -186,6 +350,40 @@ impl MmoClientEngine {
             }
         }
 
+        if !self.joined {
+            let mut mx = 0.0f32;
+            let mut mz = 0.0f32;
+            mx += if self.input.d { 1.0 } else { 0.0 } - if self.input.a { 1.0 } else { 0.0 };
+            mz += if self.input.s { 1.0 } else { 0.0 } - if self.input.w { 1.0 } else { 0.0 };
+            mx += self.input.joy_x;
+            mz += self.input.joy_y;
+            let mag_sq = mx * mx + mz * mz;
+            if mag_sq > 0.02 {
+                let len = sqrt_f32(mag_sq).max(1.0);
+                let wx = mx / len;
+                let wz = mz / len;
+                self.local_x = (self.local_x + wx * 5.4 * dt).clamp(-11.5, 11.5);
+                self.local_z = (self.local_z + wz * 5.4 * dt).clamp(-9.0, 9.0);
+                self.local_yaw = mmo_protocol::atan2_approx(wx, wz);
+                self.local_moving = true;
+            } else {
+                self.local_moving = false;
+            }
+            self.local_y = 0.0;
+            self.move_net_accum += dt;
+            if self.move_net_accum >= 0.05 {
+                self.move_net_accum = 0.0;
+                self.outbox.push(ClientPacket::Move {
+                    x: self.local_x,
+                    y: 0.0,
+                    z: self.local_z,
+                    yaw: self.local_yaw,
+                    moving: self.local_moving,
+                });
+            }
+            return;
+        }
+
         if self.joined {
             let speed = self
                 .self_id
@@ -271,7 +469,20 @@ impl MmoClientEngine {
             1 => 1,
             2 => 2,
             _ => 0,
-        };
+        } as usize;
+        if self.lan_mode && self.lan_duel_opponent.is_some() {
+            self.trigger_lan_skill(s_idx as u8);
+            return;
+        }
+        if let Some(ref duel) = self.duel {
+            if duel.round_active {
+                self.outbox.push(ClientPacket::DuelAction {
+                    target_id: duel.opponent_id.clone(),
+                    skill: s_idx as u8,
+                });
+                return;
+            }
+        }
         if self.cooldowns[s_idx] > 0.0 {
             return;
         }
@@ -290,6 +501,27 @@ impl MmoClientEngine {
 
     pub fn trigger_gather(&mut self) {
         if !self.joined {
+            let dx = self.local_x - 0.0;
+            let dz = self.local_z - -9.35;
+            if sqrt_f32(dx * dx + dz * dz) < 4.5 {
+                self.submit_join();
+                return;
+            }
+
+            let cx = self.local_x + 9.0;
+            let cz = self.local_z - 4.0;
+            if sqrt_f32(cx * cx + cz * cz) < 3.2 {
+                if self.lobby_server_ready {
+                    self.outbox.push(ClientPacket::RandomClass);
+                    return;
+                }
+                let seed = self.lobby_name.chars().fold(7u32, |acc, ch| acc.wrapping_mul(33).wrapping_add(ch as u32));
+                self.lobby_class = match seed % 3 {
+                    0 => ClassId::Vanguard,
+                    1 => ClassId::Arcanist,
+                    _ => ClassId::Ranger,
+                };
+            }
             return;
         }
         let mut best_id: Option<String> = None;
@@ -322,9 +554,9 @@ impl MmoClientEngine {
         if ch.is_control() {
             return;
         }
-        if !self.joined && self.lobby_focus_name {
-            if self.lobby_name.len() < 16 && ch != '|' {
-                self.lobby_name.push(ch);
+        if !self.joined && self.lobby_invite_focus {
+            if self.lobby_invite_input.len() < 24 && ch != '|' {
+                self.lobby_invite_input.push(ch);
             }
         } else if self.joined && self.chat_focused {
             if self.chat_input.len() < 120 && ch != '|' {
@@ -334,8 +566,8 @@ impl MmoClientEngine {
     }
 
     pub fn on_backspace(&mut self) {
-        if !self.joined && self.lobby_focus_name {
-            self.lobby_name.pop();
+        if !self.joined && self.lobby_invite_focus {
+            self.lobby_invite_input.pop();
         } else if self.joined && self.chat_focused {
             self.chat_input.pop();
         }
@@ -343,7 +575,16 @@ impl MmoClientEngine {
 
     pub fn on_enter(&mut self) {
         if !self.joined {
-            self.submit_join();
+            if self.lobby_invite_focus {
+                let room_id = self.lobby_invite_input.trim().to_string();
+                if !room_id.is_empty() {
+                    self.join_lobby_room(room_id);
+                    self.lobby_invite_input.clear();
+                    self.lobby_invite_focus = false;
+                }
+                return;
+            }
+            self.trigger_gather();
             return;
         }
         if self.chat_focused {
@@ -368,10 +609,19 @@ impl MmoClientEngine {
         } else {
             self.lobby_name.trim().to_string()
         };
-        self.outbox.push(ClientPacket::Join {
-            name,
-            class_id: self.lobby_class,
-        });
+        if self.lobby_server_ready {
+            self.outbox.push(ClientPacket::EnterWorld);
+        } else {
+            self.outbox.push(ClientPacket::EnterLobby { name });
+        }
+    }
+
+    pub fn join_lobby_room(&mut self, room_id: String) {
+        let room_id = room_id.trim().chars().take(24).collect::<String>();
+        if room_id.is_empty() {
+            return;
+        }
+        self.outbox.push(ClientPacket::JoinLobbyRoom { room_id });
     }
 
     pub fn on_pointer_down(&mut self, x: i32, y: i32) {
@@ -414,6 +664,22 @@ impl MmoClientEngine {
             self.touch_mode = !self.touch_mode;
             return;
         }
+        if x >= w - 224 && x <= w - 162 && y >= 16 && y <= 46 {
+            self.toggle_lan_mode();
+            return;
+        }
+        if self.lan_mode {
+            let panel_w = if w < 680 { w - 32 } else { 220 };
+            let panel_x = if w < 680 { 16 } else { w - 236 };
+            let panel_y = 56;
+            if x >= panel_x && x <= panel_x + panel_w && y >= panel_y + 24 && y <= panel_y + 96 {
+                let idx = ((y - (panel_y + 30)) / 14).clamp(0, 3) as usize;
+                if let Some(peer) = self.lan_peers.get(idx) {
+                    self.challenge_lan_peer(&peer.id.clone());
+                }
+                return;
+            }
+        }
 
         // Virtual Jump button when touch_mode is active in-game
         if self.joined && self.touch_mode && x >= w - 88 && x <= w - 16 && y >= h - 134 && y <= h - 88 {
@@ -422,54 +688,49 @@ impl MmoClientEngine {
         }
 
         if !self.joined {
-            // Lobby UI hitboxes
-            let panel_w = 540.min(w - 32);
-            let panel_x = (w - panel_w) / 2;
-            let panel_y = h - 245;
-
-            // Name input box
-            if x >= panel_x + 16 && x <= panel_x + panel_w - 170 && y >= panel_y + 34 && y <= panel_y + 66 {
-                self.lobby_focus_name = true;
+            let invite_w = if w < 680 { w - 32 } else { 270 };
+            let invite_x = if w < 680 { 16 } else { w - 286 };
+            let invite_y = if w < 680 { h - 98 } else { 128 };
+            let input_w = invite_w - 74;
+            if x >= invite_x && x <= invite_x + input_w && y >= invite_y && y <= invite_y + 38 {
+                self.lobby_invite_focus = true;
                 return;
             }
-            self.lobby_focus_name = false;
-
-            // Enter World button
-            if x >= panel_x + panel_w - 160 && x <= panel_x + panel_w - 16 && y >= panel_y + 34 && y <= panel_y + 66 {
-                self.submit_join();
-                return;
-            }
-
-            // 3 Class cards
-            let card_w = (panel_w - 48) / 3;
-            let card_y = panel_y + 98;
-            for idx in 0..3 {
-                let cx = panel_x + 16 + (idx as i32) * (card_w + 8);
-                if x >= cx && x <= cx + card_w && y >= card_y && y <= card_y + 72 {
-                    self.lobby_class = match idx {
-                        0 => ClassId::Vanguard,
-                        1 => ClassId::Arcanist,
-                        _ => ClassId::Ranger,
-                    };
-                    return;
+            if x >= invite_x + input_w && x <= invite_x + invite_w && y >= invite_y && y <= invite_y + 38 {
+                let room_id = self.lobby_invite_input.trim().to_string();
+                if !room_id.is_empty() {
+                    self.join_lobby_room(room_id);
+                    self.lobby_invite_input.clear();
+                    self.lobby_invite_focus = false;
                 }
+                return;
             }
+            self.trigger_gather();
             return;
         }
 
         // In-Game HUD hitboxes
         // Chat input box
-        if x >= 16 && x <= 290 && y >= h - 46 && y <= h - 16 {
-            self.chat_focused = true;
-            return;
+        let compact_hud = w < 680 || self.touch_mode;
+        if !compact_hud {
+            if x >= 16 && x <= 290 && y >= h - 46 && y <= h - 16 {
+                self.chat_focused = true;
+                return;
+            }
         }
         self.chat_focused = false;
 
         // Action Bar (Bottom-Center)
-        let bar_x = (w - 280) / 2;
+        let compact_actions = w < 680;
+        let bar_w = if compact_actions { 208 } else { 280 };
+        let bar_x = (w - bar_w) / 2;
         let bar_y = h - 68;
-        if y >= bar_y && y <= bar_y + 52 && x >= bar_x && x <= bar_x + 280 {
-            let slot = (x - bar_x) / 70;
+        if y >= bar_y && y <= bar_y + 52 && x >= bar_x && x <= bar_x + bar_w {
+            let slot = if compact_actions {
+                (x - bar_x - 6) / 50
+            } else {
+                (x - bar_x) / 70
+            };
             match slot {
                 0 => self.trigger_skill(0),
                 1 => self.trigger_skill(1),
@@ -499,7 +760,17 @@ impl MmoClientEngine {
         if let Some(mid) = clicked_mob {
             self.target_mob_id = Some(mid);
         } else {
-            self.trigger_skill(0);
+            if let Some((id, _)) = self.players.iter().find(|(id, p)| {
+                self.self_id.as_ref().map(|sid| sid != *id).unwrap_or(false)
+                    && sqrt_f32(
+                        (p.x - self.local_x) * (p.x - self.local_x)
+                            + (p.z - self.local_z) * (p.z - self.local_z),
+                    ) < 6.0
+            }) {
+                self.outbox.push(ClientPacket::DuelChallenge { target_id: id.clone() });
+            } else {
+                self.trigger_skill(0);
+            }
         }
     }
 
@@ -523,6 +794,12 @@ impl MmoClientEngine {
             if dx * dx + dy * dy <= 62 * 62 && self.input.joy_pointer.is_none() {
                 self.input.joy_pointer = Some(id);
                 self.update_joystick(x, y);
+                return;
+            }
+
+            // Compact touch chat button
+            if x >= w - 88 && x <= w - 16 && y >= h - 188 && y <= h - 142 {
+                self.chat_focused = !self.chat_focused;
                 return;
             }
 

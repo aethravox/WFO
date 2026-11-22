@@ -17,7 +17,7 @@ use lang::ui::Rect;
 use mmo_protocol::{
     abs_f32, ceil_f32, clamp_f32, cos_approx, floor_f32, ground_height_at, sin_approx, sqrt_f32,
     zone_at, ChatEntry, ClassId, ClientPacket, CrystalSnapshot, MmoLangController, MobKind,
-    MobSnapshot, PlayerSnapshot, ServerPacket, ZoneId, PLAYABLE_RADIUS,
+    LanPacket, MobSnapshot, PlayerSnapshot, ServerPacket, ZoneId, PLAYABLE_RADIUS,
 };
 use raster3d::{Camera, Framebuffer, Vec3};
 
@@ -38,6 +38,23 @@ pub struct FloatingPopup {
     pub text: String,
     pub color: u32,
     pub age: f32,
+}
+
+pub struct LanPeer {
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    pub udp_port: u16,
+}
+
+pub struct DuelUiState {
+    pub opponent_id: String,
+    pub opponent_name: String,
+    pub round: i32,
+    pub wins: i32,
+    pub opponent_wins: i32,
+    pub round_active: bool,
+    pub round_winner: String,
 }
 
 pub struct InputState {
@@ -84,6 +101,10 @@ pub struct MmoClientEngine {
     pub fb: Framebuffer,
     pub lang: MmoLangController,
     pub joined: bool,
+    pub lobby_server_ready: bool,
+    pub lobby_room_id: String,
+    pub lobby_invite_input: String,
+    pub lobby_invite_focus: bool,
     pub connecting: bool,
     pub self_id: Option<String>,
     pub lobby_name: String,
@@ -96,6 +117,16 @@ pub struct MmoClientEngine {
     pub chat_input: String,
     pub chat_focused: bool,
     pub target_mob_id: Option<String>,
+    pub duel: Option<DuelUiState>,
+    pub lan_mode: bool,
+    pub lan_peers: Vec<LanPeer>,
+    pub lan_duel_opponent: Option<String>,
+    pub lan_pending_skill: Option<u8>,
+    pub lan_remote_skill: Option<u8>,
+    pub lan_duel_wins: i32,
+    pub lan_duel_opponent_wins: i32,
+    pub lan_duel_round: i32,
+    pub lan_outbox: Vec<LanPacket>,
     pub local_x: f32,
     pub local_y: f32,
     pub local_z: f32,

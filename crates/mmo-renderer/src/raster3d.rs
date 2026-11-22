@@ -141,14 +141,45 @@ impl Framebuffer {
         let h = self.height.max(1);
         for y in 0..self.height {
             let t = y as f32 / h as f32;
-            // Atmospheric horizon gradient (#3b6590 -> #769ec4)
+            // Atmospheric horizon gradient with warmer daylight near the horizon.
             let r = (55.0 + t * 65.0) as u32;
-            let g = (95.0 + t * 68.0) as u32;
-            let b = (142.0 + t * 58.0) as u32;
+            let g = (95.0 + t * 78.0) as u32;
+            let b = (142.0 + t * 66.0) as u32;
             let col = (r << 16) | (g << 8) | b;
             let row_start = y * self.width;
             let row_end = row_start + self.width;
             self.pixels[row_start..row_end].fill(col);
+        }
+
+        // Soft sun disc and a few thin clouds give the world a more readable sky.
+        let sun_x = (self.width as i32 * 78) / 100;
+        let sun_y = (self.height as i32 * 18) / 100;
+        for dy in -14..=14 {
+            for dx in -14..=14 {
+                let d2 = dx * dx + dy * dy;
+                if d2 <= 196 {
+                    let x = sun_x + dx;
+                    let y = sun_y + dy;
+                    if x >= 0 && y >= 0 && x < self.width as i32 && y < self.height as i32 {
+                        let glow = if d2 <= 90 { 0xFFF4C4 } else { 0xF6D58A };
+                        self.pixels[(y as usize) * self.width + x as usize] = glow;
+                    }
+                }
+            }
+        }
+        let cloud_rows = [((self.height as i32 * 12) / 100).max(18), ((self.height as i32 * 27) / 100).max(48)];
+        for (idx, cy) in cloud_rows.iter().enumerate() {
+            let cx = if idx == 0 { (self.width as i32 * 18) / 100 } else { (self.width as i32 * 56) / 100 };
+            for oy in -2..=2 {
+                for ox in -34..=34 {
+                    let x = cx + ox;
+                    let y = cy + oy;
+                    let edge = (ox * ox) / 1152 + (oy * oy) / 5;
+                    if edge < 1 && x >= 0 && y >= 0 && x < self.width as i32 && y < self.height as i32 {
+                        self.pixels[(y as usize) * self.width + x as usize] = 0xEAF2F7;
+                    }
+                }
+            }
         }
     }
 

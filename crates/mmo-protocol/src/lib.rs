@@ -214,7 +214,49 @@ pub struct ChatEntry {
 }
 
 #[derive(Debug, Clone)]
+pub enum LanPacket {
+    Announce {
+        peer_id: String,
+        name: String,
+        udp_port: u16,
+        address: String,
+    },
+    Challenge {
+        from_id: String,
+        from_name: String,
+    },
+    Accept {
+        from_id: String,
+    },
+    Action {
+        from_id: String,
+        round: i32,
+        skill: u8,
+    },
+    Surrender {
+        from_id: String,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub enum ClientPacket {
+    EnterLobby {
+        name: String,
+    },
+    CreateInvite,
+    JoinLobbyRoom {
+        room_id: String,
+    },
+    RandomClass,
+    EnterWorld,
+    DuelChallenge {
+        target_id: String,
+    },
+    DuelAction {
+        target_id: String,
+        skill: u8,
+    },
+    DuelSurrender,
     Join {
         name: String,
         class_id: ClassId,
@@ -241,6 +283,29 @@ pub enum ClientPacket {
 
 #[derive(Debug, Clone)]
 pub enum ServerPacket {
+    LobbyInit {
+        self_id: String,
+        room_id: String,
+    },
+    LobbyInvite {
+        room_id: String,
+    },
+    LobbyJoined {
+        room_id: String,
+    },
+    LobbyClass {
+        class_id: ClassId,
+    },
+    WorldEntered,
+    DuelState {
+        opponent_id: String,
+        opponent_name: String,
+        round: i32,
+        wins: i32,
+        opponent_wins: i32,
+        round_active: bool,
+        round_winner: String,
+    },
     Init { self_id: String },
     Player(PlayerSnapshot),
     Mob(MobSnapshot),
@@ -266,9 +331,89 @@ pub fn sanitize_field(s: &str, max_len: usize) -> String {
     out
 }
 
+impl LanPacket {
+    pub fn encode(&self) -> String {
+        match self {
+            Self::Announce { peer_id, name, udp_port, address } => format!(
+                "LAN|ANN|{}|{}|{}|{}",
+                sanitize_field(peer_id, 24),
+                sanitize_field(name, 18),
+                udp_port,
+                sanitize_field(address, 48)
+            ),
+            Self::Challenge { from_id, from_name } => format!(
+                "LAN|CHAL|{}|{}",
+                sanitize_field(from_id, 24),
+                sanitize_field(from_name, 18)
+            ),
+            Self::Accept { from_id } => format!(
+                "LAN|ACC|{}",
+                sanitize_field(from_id, 24)
+            ),
+            Self::Action { from_id, round, skill } => format!(
+                "LAN|ACT|{}|{}|{}",
+                sanitize_field(from_id, 24),
+                round,
+                skill
+            ),
+            Self::Surrender { from_id } => format!(
+                "LAN|SUR|{}",
+                sanitize_field(from_id, 24)
+            ),
+        }
+    }
+
+    pub fn decode(line: &str) -> Option<Self> {
+        let parts: Vec<&str> = line.trim().split('|').collect();
+        if parts.first().copied()? != "LAN" {
+            return None;
+        }
+        match parts.get(1).copied()? {
+            "ANN" if parts.len() >= 6 => Some(Self::Announce {
+                peer_id: sanitize_field(parts[2], 24),
+                name: sanitize_field(parts[3], 18),
+                udp_port: parts[4].parse().ok()?,
+                address: sanitize_field(parts[5], 48),
+            }),
+            "CHAL" if parts.len() >= 4 => Some(Self::Challenge {
+                from_id: sanitize_field(parts[2], 24),
+                from_name: sanitize_field(parts[3], 18),
+            }),
+            "ACC" if parts.len() >= 3 => Some(Self::Accept {
+                from_id: sanitize_field(parts[2], 24),
+            }),
+            "ACT" if parts.len() >= 5 => Some(Self::Action {
+                from_id: sanitize_field(parts[2], 24),
+                round: parts[3].parse().ok()?,
+                skill: parts[4].parse().ok()?,
+            }),
+            "SUR" if parts.len() >= 3 => Some(Self::Surrender {
+                from_id: sanitize_field(parts[2], 24),
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl ClientPacket {
     pub fn encode(&self) -> String {
         match self {
+            Self::EnterLobby { name } => {
+                format!("LOBBY|{}", sanitize_field(name, 18))
+            }
+            Self::CreateInvite => String::from("INVITE"),
+            Self::JoinLobbyRoom { room_id } => {
+                format!("JOINROOM|{}", sanitize_field(room_id, 24))
+            }
+            Self::RandomClass => String::from("RANDOM"),
+            Self::EnterWorld => String::from("WORLD"),
+            Self::DuelChallenge { target_id } => {
+                format!("DUELCHAL|{}", sanitize_field(target_id, 24))
+            }
+            Self::DuelAction { target_id, skill } => {
+                format!("DUELACT|{}|{}", sanitize_field(target_id, 24), skill)
+            }
+            Self::DuelSurrender => String::from("DUELSURRENDER"),
             Self::Join { name, class_id } => {
                 format!("JOIN|{}|{}", sanitize_field(name, 18), class_id.as_code())
             }
@@ -301,6 +446,23 @@ impl ClientPacket {
     pub fn decode(line: &str) -> Option<Self> {
         let parts: Vec<&str> = line.trim().split('|').collect();
         match parts.first().copied()? {
+            "LOBBY" if parts.len() >= 2 => Some(Self::EnterLobby {
+                name: sanitize_field(parts[1], 18),
+            }),
+            "INVITE" => Some(Self::CreateInvite),
+            "JOINROOM" if parts.len() >= 2 => Some(Self::JoinLobbyRoom {
+                room_id: sanitize_field(parts[1], 24),
+            }),
+            "RANDOM" => Some(Self::RandomClass),
+            "WORLD" => Some(Self::EnterWorld),
+            "DUELCHAL" if parts.len() >= 2 => Some(Self::DuelChallenge {
+                target_id: sanitize_field(parts[1], 24),
+            }),
+            "DUELACT" if parts.len() >= 3 => Some(Self::DuelAction {
+                target_id: sanitize_field(parts[1], 24),
+                skill: parts[2].parse().ok()?,
+            }),
+            "DUELSURRENDER" => Some(Self::DuelSurrender),
             "JOIN" if parts.len() >= 3 => Some(Self::Join {
                 name: sanitize_field(parts[1], 18),
                 class_id: ClassId::from_str_code(parts[2]),
@@ -331,6 +493,37 @@ impl ClientPacket {
 impl ServerPacket {
     pub fn encode(&self) -> String {
         match self {
+            Self::LobbyInit { self_id, room_id } => {
+                format!("LOBBYINIT|{}|{}", sanitize_field(self_id, 24), sanitize_field(room_id, 24))
+            }
+            Self::LobbyInvite { room_id } => {
+                format!("LOBBYINVITE|{}", sanitize_field(room_id, 24))
+            }
+            Self::LobbyJoined { room_id } => {
+                format!("LOBBYJOINED|{}", sanitize_field(room_id, 24))
+            }
+            Self::LobbyClass { class_id } => {
+                format!("LOBBYCLASS|{}", class_id.as_code())
+            }
+            Self::WorldEntered => String::from("WORLDENTERED"),
+            Self::DuelState {
+                opponent_id,
+                opponent_name,
+                round,
+                wins,
+                opponent_wins,
+                round_active,
+                round_winner,
+            } => format!(
+                "DUELSTATE|{}|{}|{}|{}|{}|{}|{}",
+                sanitize_field(opponent_id, 24),
+                sanitize_field(opponent_name, 18),
+                round,
+                wins,
+                opponent_wins,
+                if *round_active { 1 } else { 0 },
+                sanitize_field(round_winner, 18)
+            ),
             Self::Init { self_id } => format!("INIT|{}", self_id),
             Self::Player(p) => format!(
                 "PLR|{}|{}|{}|{:.3}|{:.3}|{:.3}|{:.3}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
@@ -405,6 +598,29 @@ impl ServerPacket {
     pub fn decode(line: &str) -> Option<Self> {
         let parts: Vec<&str> = line.trim().split('|').collect();
         match parts.first().copied()? {
+            "LOBBYINIT" if parts.len() >= 3 => Some(Self::LobbyInit {
+                self_id: parts[1].to_string(),
+                room_id: parts[2].to_string(),
+            }),
+            "LOBBYINVITE" if parts.len() >= 2 => Some(Self::LobbyInvite {
+                room_id: parts[1].to_string(),
+            }),
+            "LOBBYJOINED" if parts.len() >= 2 => Some(Self::LobbyJoined {
+                room_id: parts[1].to_string(),
+            }),
+            "LOBBYCLASS" if parts.len() >= 2 => Some(Self::LobbyClass {
+                class_id: ClassId::from_str_code(parts[1]),
+            }),
+            "WORLDENTERED" => Some(Self::WorldEntered),
+            "DUELSTATE" if parts.len() >= 8 => Some(Self::DuelState {
+                opponent_id: parts[1].to_string(),
+                opponent_name: parts[2].to_string(),
+                round: parts[3].parse().ok()?,
+                wins: parts[4].parse().ok()?,
+                opponent_wins: parts[5].parse().ok()?,
+                round_active: parts[6] == "1",
+                round_winner: parts[7].to_string(),
+            }),
             "INIT" if parts.len() >= 2 => Some(Self::Init {
                 self_id: parts[1].to_string(),
             }),

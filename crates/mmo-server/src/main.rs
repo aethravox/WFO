@@ -49,8 +49,22 @@ impl ClientSink {
 struct ServerPlayer {
     snap: PlayerSnapshot,
     joined: bool,
+    in_lobby: bool,
+    room_id: String,
+    duel: Option<DuelState>,
     sink: ClientSink,
     skill_cd_until: [Instant; 3],
+}
+
+#[derive(Clone)]
+struct DuelState {
+    opponent_id: String,
+    round: i32,
+    wins: i32,
+    opponent_wins: i32,
+    round_active: bool,
+    round_winner: String,
+    pending_skill: Option<u8>,
 }
 
 struct ServerMob {
@@ -205,6 +219,20 @@ impl WorldState {
         }
     }
 
+    fn broadcast_lobby(&self, room_id: &str, pkt: &ServerPacket, exclude: Option<&str>) {
+        for (id, p) in &self.players {
+            if !p.in_lobby || p.room_id != room_id {
+                continue;
+            }
+            if let Some(ex) = exclude {
+                if id == ex {
+                    continue;
+                }
+            }
+            p.sink.send_packet(pkt);
+        }
+    }
+
     fn grant_rewards(&mut self, player_id: &str, xp_gain: i32, gold_gain: i32) {
         let mut leveled_to: Option<i32> = None;
         if let Some(p) = self.players.get_mut(player_id) {
@@ -235,6 +263,292 @@ impl WorldState {
     fn handle_packet(&mut self, player_id: &str, pkt: ClientPacket) {
         let now = Instant::now();
         match pkt {
+            ClientPacket::DuelChallenge { target_id } => {
+                let target_joined = self.players.get(&target_id).map(|p| p.joined).unwrap_or(false);
+                if !target_joined {
+                    return;
+                }
+                let challenger_joined = self.players.get(player_id).map(|p| p.joined).unwrap_or(false);
+                if !challenger_joined {
+                    return;
+                }
+                let duel = DuelState {
+                    opponent_id: target_id.clone(),
+                    round: 1,
+                    wins: 0,
+                    opponent_wins: 0,
+                    round_active: true,
+                    round_winner: String::new(),
+                    pending_skill: None,
+                };
+                if let Some(p) = self.players.get_mut(player_id) {
+                    p.duel = Some(duel.clone());
+                }
+                if let Some(p) = self.players.get_mut(&target_id) {
+                    p.duel = Some(DuelState {
+                        opponent_id: player_id.to_string(),
+                        round: 1,
+                        wins: 0,
+                        opponent_wins: 0,
+                        round_active: true,
+                        round_winner: String::new(),
+                        pending_skill: None,
+                    });
+                }
+                if let (Some(a), Some(b)) = (self.players.get(player_id), self.players.get(&target_id)) {
+                    let state_a = ServerPacket::DuelState {
+                        opponent_id: b.snap.id.clone(),
+                        opponent_name: b.snap.name.clone(),
+                        round: 1,
+                        wins: 0,
+                        opponent_wins: 0,
+                        round_active: true,
+                        round_winner: String::new(),
+                    };
+                    let state_b = ServerPacket::DuelState {
+                        opponent_id: a.snap.id.clone(),
+                        opponent_name: a.snap.name.clone(),
+                        round: 1,
+                        wins: 0,
+                        opponent_wins: 0,
+                        round_active: true,
+                        round_winner: String::new(),
+                    };
+                    a.sink.send_packet(&state_a);
+                    b.sink.send_packet(&state_b);
+                }
+            }
+            ClientPacket::DuelAction { target_id, skill } => {
+                if target_id.is_empty() {
+                    return;
+                }
+                let skill = skill.min(2);
+                if let Some(p) = self.players.get_mut(player_id) {
+                    if let Some(ref mut duel) = p.duel {
+                        if duel.opponent_id != target_id || !duel.round_active {
+                            return;
+                        }
+                        duel.pending_skill = Some(skill);
+                    } else {
+                        return;
+                    }
+                }
+
+                let opponent_ready = self.players.get(&target_id)
+                    .and_then(|p| p.duel.as_ref())
+                    .and_then(|d| d.pending_skill)
+                    .is_some();
+                let own_skill = self.players.get(player_id)
+                    .and_then(|p| p.duel.as_ref())
+                    .and_then(|d| d.pending_skill);
+                if !opponent_ready {
+                    return;
+                }
+                let opponent_skill = self.players.get(&target_id)
+                    .and_then(|p| p.duel.as_ref())
+                    .and_then(|d| d.pending_skill)
+                    .unwrap_or(0);
+                let own_skill = own_skill.unwrap_or(0);
+
+                let round_winner = if own_skill == opponent_skill {
+                    String::from("EMPATE")
+                } else if (own_skill == 0 && opponent_skill == 2)
+                    || (own_skill == 1 && opponent_skill == 0)
+                    || (own_skill == 2 && opponent_skill == 1)
+                {
+                    let name = self.players.get(player_id).map(|p| p.snap.name.clone()).unwrap_or_default();
+                    if let Some(p) = self.players.get_mut(player_id) {
+                        if let Some(ref mut duel) = p.duel {
+                            duel.wins += 1;
+                        }
+                    }
+                    if let Some(p) = self.players.get_mut(&target_id) {
+                        if let Some(ref mut duel) = p.duel {
+                            duel.opponent_wins += 1;
+                        }
+                    }
+                    name
+                } else {
+                    let name = self.players.get(&target_id).map(|p| p.snap.name.clone()).unwrap_or_default();
+                    if let Some(p) = self.players.get_mut(&target_id) {
+                        if let Some(ref mut duel) = p.duel {
+                            duel.wins += 1;
+                        }
+                    }
+                    if let Some(p) = self.players.get_mut(player_id) {
+                        if let Some(ref mut duel) = p.duel {
+                            duel.opponent_wins += 1;
+                        }
+                    }
+                    name
+                };
+
+                for pid in [player_id, target_id.as_str()] {
+                    if let Some(p) = self.players.get_mut(pid) {
+                        if let Some(ref mut duel) = p.duel {
+                            duel.round_winner = round_winner.clone();
+                            duel.round_active = duel.wins < 3 && duel.opponent_wins < 3;
+                            if duel.round_active {
+                                duel.round = (duel.round + 1).min(5);
+                            } else {
+                                duel.round = 5;
+                            }
+                            duel.pending_skill = None;
+                        }
+                    }
+                }
+
+                for pid in [player_id, target_id.as_str()] {
+                    if let (Some(p), Some(d)) = (self.players.get(pid), self.players.get(pid).and_then(|p| p.duel.clone())) {
+                        let opponent = self.players.get(&d.opponent_id);
+                        if let Some(opponent) = opponent {
+                            p.sink.send_packet(&ServerPacket::DuelState {
+                                opponent_id: opponent.snap.id.clone(),
+                                opponent_name: opponent.snap.name.clone(),
+                                round: d.round,
+                                wins: d.wins,
+                                opponent_wins: d.opponent_wins,
+                                round_active: d.round_active,
+                                round_winner: d.round_winner,
+                            });
+                        }
+                    }
+                }
+            }
+            ClientPacket::DuelSurrender => {
+                if let Some(p) = self.players.get_mut(player_id) {
+                    p.duel = None;
+                }
+            }
+            ClientPacket::EnterLobby { name } => {
+                let clean = sanitize_field(name.trim(), 18);
+                let clean_name = if clean.is_empty() { String::from("Traveler") } else { clean };
+                let room_id = format!("room_{}", player_id);
+                let sink = {
+                    let Some(p) = self.players.get_mut(player_id) else {
+                        return;
+                    };
+                    p.snap.name = clean_name;
+                    p.snap.x = 0.0;
+                    p.snap.y = 0.0;
+                    p.snap.z = 4.0;
+                    p.joined = false;
+                    p.in_lobby = true;
+                    p.room_id = room_id.clone();
+                    p.sink.clone()
+                };
+                sink.send_packet(&ServerPacket::LobbyInit {
+                    self_id: player_id.to_string(),
+                    room_id,
+                });
+            }
+            ClientPacket::CreateInvite => {
+                let sink = {
+                    let Some(p) = self.players.get(player_id) else {
+                        return;
+                    };
+                    if !p.in_lobby {
+                        return;
+                    }
+                    p.sink.clone()
+                };
+                let room_id = self.players.get(player_id).map(|p| p.room_id.clone()).unwrap_or_default();
+                if !room_id.is_empty() {
+                    sink.send_packet(&ServerPacket::LobbyInvite { room_id });
+                }
+            }
+            ClientPacket::JoinLobbyRoom { room_id } => {
+                let clean_room = sanitize_field(room_id.trim(), 24);
+                let exists = self.players.values().any(|p| p.in_lobby && p.room_id == clean_room);
+                if !exists {
+                    return;
+                }
+                let sink = {
+                    let Some(p) = self.players.get_mut(player_id) else {
+                        return;
+                    };
+                    if !p.in_lobby {
+                        return;
+                    }
+                    p.room_id = clean_room.clone();
+                    p.snap.x = 0.0;
+                    p.snap.z = 4.0;
+                    p.sink.clone()
+                };
+                sink.send_packet(&ServerPacket::LobbyJoined {
+                    room_id: clean_room.clone(),
+                });
+                for (id, p) in &self.players {
+                    if p.in_lobby && p.room_id == clean_room {
+                        sink.send_packet(&ServerPacket::Player(p.snap.clone()));
+                        if id != player_id {
+                            p.sink.send_packet(&ServerPacket::Player(
+                                self.players.get(player_id).map(|p| p.snap.clone()).unwrap_or_else(|| p.snap.clone()),
+                            ));
+                        }
+                    }
+                }
+            }
+            ClientPacket::RandomClass => {
+                let seed = self.next_rand();
+                let class_id = match (seed * 3.0) as u8 % 3 {
+                    0 => ClassId::Vanguard,
+                    1 => ClassId::Arcanist,
+                    _ => ClassId::Ranger,
+                };
+                let sink = {
+                    let Some(p) = self.players.get_mut(player_id) else {
+                        return;
+                    };
+                    if !p.in_lobby {
+                        return;
+                    }
+                    p.snap.class_id = class_id;
+                    p.snap.max_hp = class_id.base_hp();
+                    p.snap.hp = class_id.base_hp();
+                    p.snap.max_mp = class_id.base_mp();
+                    p.snap.mp = class_id.base_mp();
+                    p.sink.clone()
+                };
+                sink.send_packet(&ServerPacket::LobbyClass { class_id });
+            }
+            ClientPacket::EnterWorld => {
+                let sink = {
+                    let Some(p) = self.players.get_mut(player_id) else {
+                        return;
+                    };
+                    if !p.in_lobby {
+                        return;
+                    }
+                    p.in_lobby = false;
+                    p.joined = true;
+                    p.snap.x = 0.0;
+                    p.snap.y = ground_height_at(0.0, 4.0);
+                    p.snap.z = 4.0;
+                    p.snap.moving = false;
+                    p.sink.clone()
+                };
+                sink.send_packet(&ServerPacket::WorldEntered);
+                sink.send_packet(&ServerPacket::Init {
+                    self_id: player_id.to_string(),
+                });
+                let world_snap = self.players.get(player_id).map(|p| p.snap.clone());
+                if let Some(snap) = world_snap {
+                    for other in self.players.values() {
+                        if other.joined {
+                            sink.send_packet(&ServerPacket::Player(other.snap.clone()));
+                        }
+                    }
+                    for m in self.mobs.values() {
+                        sink.send_packet(&ServerPacket::Mob(m.snap.clone()));
+                    }
+                    for c in self.crystals.values() {
+                        sink.send_packet(&ServerPacket::Crystal(c.snap.clone()));
+                    }
+                    sink.send_packet(&ServerPacket::SnapshotEnd);
+                    self.broadcast(&ServerPacket::Player(snap), Some(player_id));
+                }
+            }
             ClientPacket::Join { name, class_id } => {
                 let clean = sanitize_field(name.trim(), 18);
                 let clean_name = if clean.is_empty() {
@@ -284,6 +598,28 @@ impl WorldState {
             } => {
                 if !x.is_finite() || !z.is_finite() || !yaw.is_finite() {
                     return;
+                }
+                if let Some(p) = self.players.get(player_id) {
+                    if p.in_lobby {
+                        let cx = x.clamp(-11.5, 11.5);
+                        let cz = z.clamp(-9.0, 9.0);
+                        if let Some(player) = self.players.get_mut(player_id) {
+                            player.snap.x = cx;
+                            player.snap.y = 0.0;
+                            player.snap.z = cz;
+                            player.snap.yaw = yaw;
+                            player.snap.moving = moving;
+                        }
+                        let room_id = self.players.get(player_id).map(|p| p.room_id.clone()).unwrap_or_default();
+                        let snap = self.players.get(player_id).map(|p| p.snap.clone());
+                        if let (false, Some(snap)) = (room_id.is_empty(), snap) {
+                            self.broadcast_lobby(&room_id, &ServerPacket::Player(snap), None);
+                        }
+                        return;
+                    }
+                    if !p.joined {
+                        return;
+                    }
                 }
                 let dist = sqrt_f32(x * x + z * z);
                 let (cx, cz) = if dist > PLAYABLE_RADIUS {
@@ -780,6 +1116,9 @@ fn register_player(state: &Arc<Mutex<WorldState>>, sink: ClientSink) -> String {
                 attack_tick: 0,
             },
             joined: false,
+            in_lobby: false,
+            room_id: String::new(),
+            duel: None,
             sink,
             skill_cd_until: [now, now, now],
         },
