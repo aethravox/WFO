@@ -1,0 +1,25 @@
+plugins {
+    id 'com.android.application' version '8.7.3'
+}
+
+android {
+    namespace 'com.aethravox.wfo'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.aethravox.wfo'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs '../jniLibs'
+        }
+    }
+}

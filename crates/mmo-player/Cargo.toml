@@ -8,8 +8,21 @@ license.workspace = true
 name = "wfo-player"
 path = "src/main.rs"
 
+[lib]
+name = "wfo_player"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
 [dependencies]
 mmo-protocol = { path = "../mmo-protocol" }
 mmo-renderer = { path = "../mmo-renderer" }
-softbuffer = "0.4"
-winit = { version = "0.30", default-features = false, features = ["x11", "wayland", "rwh_06"] }
+pollster = "0.4"
+wgpu = "27"
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["x11", "rwh_06"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["android-native-activity", "rwh_06"] }
+android-activity = "0.6"

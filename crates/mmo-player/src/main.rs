@@ -1,9 +1,7 @@
 use mmo_protocol::ServerPacket;
 use mmo_renderer::MmoClientEngine;
-use softbuffer::{Context, Surface};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::num::NonZeroU32;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -14,6 +12,9 @@ use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchP
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
+
+mod gpu;
+use gpu::GpuSurface;
 
 fn spawn_tcp_client(
     addr: String,
@@ -66,8 +67,7 @@ fn spawn_tcp_client(
 
 struct PlayerApp {
     window: Option<Arc<Window>>,
-    context: Option<Context<Arc<Window>>>,
-    surface: Option<Surface<Arc<Window>, Arc<Window>>>,
+    gpu: Option<GpuSurface>,
     engine: MmoClientEngine,
     rx_in: Receiver<ServerPacket>,
     tx_out: Sender<String>,
@@ -78,11 +78,18 @@ struct PlayerApp {
 
 impl PlayerApp {
     fn new(rx_in: Receiver<ServerPacket>, tx_out: Sender<String>) -> Self {
+        #[cfg(target_os = "android")]
+        let mut engine = MmoClientEngine::new(960, 600);
+        #[cfg(target_os = "android")]
+        {
+            engine.touch_mode = true;
+        }
+        #[cfg(not(target_os = "android"))]
+        let engine = MmoClientEngine::new(960, 600);
         Self {
             window: None,
-            context: None,
-            surface: None,
-            engine: MmoClientEngine::new(960, 600),
+            gpu: None,
+            engine,
             rx_in,
             tx_out,
             last_frame: Instant::now(),
@@ -175,17 +182,8 @@ impl PlayerApp {
         }
         self.engine.render();
 
-        if let Some(surface) = self.surface.as_mut() {
-            let w = self.engine.fb.width as u32;
-            let h = self.engine.fb.height as u32;
-            if let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) {
-                let _ = surface.resize(nw, nh);
-                if let Ok(mut buf) = surface.buffer_mut() {
-                    let count = buf.len().min(self.engine.fb.pixels.len());
-                    buf[..count].copy_from_slice(&self.engine.fb.pixels[..count]);
-                    let _ = buf.present();
-                }
-            }
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.present(&self.engine.fb.pixels, self.engine.fb.width, self.engine.fb.height);
         }
     }
 }
@@ -207,11 +205,9 @@ impl ApplicationHandler for PlayerApp {
         self.engine
             .resize(size.width.max(320) as usize, size.height.max(240) as usize);
 
-        let context = Context::new(win.clone()).expect("softbuffer context");
-        let surface = Surface::new(&context, win.clone()).expect("softbuffer surface");
+        let gpu = GpuSurface::new(win.clone());
         self.window = Some(win);
-        self.context = Some(context);
-        self.surface = Some(surface);
+        self.gpu = Some(gpu);
     }
 
     fn window_event(
@@ -227,6 +223,9 @@ impl ApplicationHandler for PlayerApp {
             WindowEvent::Resized(size) => {
                 self.engine
                     .resize(size.width.max(320) as usize, size.height.max(240) as usize);
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.resize(size.width.max(320), size.height.max(240));
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_x = position.x as i32;

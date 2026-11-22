@@ -351,6 +351,23 @@ impl Framebuffer {
         self.fill_rect(x + w - 1, y, 1, h, rgb);
     }
 
+    pub fn rounded_panel(&mut self, x: i32, y: i32, w: i32, h: i32, rgb: u32, alpha: u32) {
+        let radius = 8.min(w / 4).min(h / 4);
+        self.fill_rect_alpha(x + radius, y, w - radius * 2, h, rgb, alpha);
+        self.fill_rect_alpha(x, y + radius, w, h - radius * 2, rgb, alpha);
+        self.fill_rect_alpha(x + radius, y + radius, w - radius * 2, h - radius * 2, rgb, alpha);
+    }
+
+    pub fn panel_border(&mut self, x: i32, y: i32, w: i32, h: i32, rgb: u32) {
+        self.stroke_rect(x, y, w, h, rgb);
+        self.fill_rect(x + 2, y + 2, w - 4, 1, rgb);
+    }
+
+    pub fn draw_text_shadow(&mut self, x: i32, y: i32, text: &str, scale: i32, rgb: u32) {
+        self.draw_text(x + scale.max(1), y + scale.max(1), text, scale, 0x020617);
+        self.draw_text(x, y, text, scale, rgb);
+    }
+
     pub fn draw_text(&mut self, x: i32, y: i32, text: &str, scale: i32, rgb: u32) {
         let s = scale.max(1);
         let mut cx = x;
