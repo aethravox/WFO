@@ -53,7 +53,7 @@ fn resolve_server_addr() -> Option<String> {
     Some(std::env::var("WFO_SERVER").unwrap_or_else(|_| String::from("127.0.0.1:7878")))
 }
 
-fn run(android_data_dir: Option<PathBuf>) {
+fn run(android_data_dir: Option<PathBuf>, event_loop: EventLoop<()>) {
     let Some(server_addr) = resolve_server_addr() else {
         return;
     };
@@ -66,16 +66,20 @@ fn run(android_data_dir: Option<PathBuf>) {
     let tx_lan = spawn_lan_service(tx_lan_in);
     spawn_tls_client(server_addr, tx_in, rx_out, tls_config);
 
-    let event_loop = EventLoop::new().expect("create winit event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = PlayerApp::new(rx_in, tx_out, rx_lan, tx_lan, profile);
     event_loop.run_app(&mut app).expect("run native MMO player");
 }
 
+#[cfg(not(target_os = "android"))]
 fn main() {
-    run(None);
+    let event_loop = EventLoop::new().expect("create winit event loop");
+    run(None, event_loop);
 }
 
-#[cfg(test)]
+#[cfg(target_os = "android")]
+#[allow(dead_code)]
+fn main() {}
+
 #[cfg(test)]
 mod tests;

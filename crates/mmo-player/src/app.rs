@@ -225,26 +225,38 @@ impl PlayerApp {
 
 impl ApplicationHandler for PlayerApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        let attrs = Window::default_attributes()
-            .with_title("Wayfarers Online (WFO) — Native Rust MMO")
-            .with_inner_size(LogicalSize::new(960.0, 600.0));
-        let win = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("create native MMO window"),
-        );
-        #[cfg(target_os = "android")]
-        win.set_ime_allowed(true);
+        let win = if let Some(existing) = &self.window {
+            existing.clone()
+        } else {
+            let attrs = Window::default_attributes()
+                .with_title("Wayfarers Online (WFO) — Native Rust MMO")
+                .with_inner_size(LogicalSize::new(960.0, 600.0));
+            let created = Arc::new(
+                event_loop
+                    .create_window(attrs)
+                    .expect("create native MMO window"),
+            );
+            #[cfg(target_os = "android")]
+            created.set_ime_allowed(true);
+            self.window = Some(created.clone());
+            created
+        };
         let size = win.inner_size();
-        self.engine
-            .resize(size.width.max(320) as usize, size.height.max(240) as usize);
+        let width = size.width.max(320);
+        let height = size.height.max(240);
+        self.engine.resize(width as usize, height as usize);
+        if self.gpu.is_none() {
+            self.gpu = Some(GpuSurface::new(win));
+        } else if let Some(gpu) = self.gpu.as_mut() {
+            gpu.resize(width, height);
+        }
+    }
 
-        let gpu = GpuSurface::new(win.clone());
-        self.window = Some(win);
-        self.gpu = Some(gpu);
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        {
+            self.gpu = None;
+        }
     }
 
     fn window_event(

@@ -50,30 +50,58 @@ impl GpuSurface {
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))
+        .or_else(|_| {
+            pollster::block_on(instance.request_adapter(&RequestAdapterOptions {
+                power_preference: PowerPreference::LowPower,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            }))
+        })
         .expect("find a compatible wgpu adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&DeviceDescriptor {
             label: Some("WFO GPU"),
             required_features: Features::empty(),
-            required_limits: Limits::downlevel_webgl2_defaults(),
+            required_limits: Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             trace: wgpu::Trace::Off,
         }))
         .expect("create wgpu device");
 
-        let surface_format = surface
-            .get_capabilities(&adapter)
+        let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps
             .formats
-            .into_iter()
+            .iter()
+            .copied()
             .find(|format| format.is_srgb())
-            .unwrap_or(TextureFormat::Bgra8UnormSrgb);
+            .or_else(|| caps.formats.first().copied())
+            .unwrap_or(TextureFormat::Rgba8UnormSrgb);
+        let present_mode = if caps.present_modes.contains(&PresentMode::Fifo) {
+            PresentMode::Fifo
+        } else {
+            caps.present_modes
+                .first()
+                .copied()
+                .unwrap_or(PresentMode::Fifo)
+        };
+        let alpha_mode = if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::Opaque)
+        {
+            wgpu::CompositeAlphaMode::Opaque
+        } else {
+            caps.alpha_modes
+                .first()
+                .copied()
+                .unwrap_or(wgpu::CompositeAlphaMode::Auto)
+        };
         let config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width,
             height,
-            present_mode: PresentMode::Fifo,
-            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            present_mode,
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -464,6 +492,10 @@ fn srgb_to_linear(color: f32) -> f32 {
 
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
             Err(_) => return,
         };
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
