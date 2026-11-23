@@ -9,4 +9,9 @@ name = "wfo-server"
 path = "src/main.rs"
 
 [dependencies]
+argon2 = "0.5"
 mmo-protocol = { path = "../mmo-protocol" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"

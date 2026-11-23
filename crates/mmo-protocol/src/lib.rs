@@ -1,850 +1,215 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::format;
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-use lang::ui::{
-    ButtonMode, ButtonView, LabelStyle, LangButton, LangHost, Rect, UiEvent,
-};
-use lang::{CatalogEntry, LangCatalog, Language};
-
 pub const PLAYABLE_RADIUS: f32 = 84.0;
 pub const SAFE_PLAZA_RADIUS: f32 = 16.0;
+pub const FOREST_TREE_COUNT: usize = 56;
+pub const TREE_COLLISION_RADIUS: f32 = 0.7;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum ClassId {
-    Vanguard = 0,
-    Arcanist = 1,
-    Ranger = 2,
-}
+mod language;
+mod math;
+mod packets;
+mod types;
+pub use language::*;
+pub use math::*;
+pub use packets::*;
+pub use types::*;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::string::String;
 
-impl ClassId {
-    pub fn from_str_code(s: &str) -> Self {
-        match s {
-            "arcanist" | "1" => Self::Arcanist,
-            "ranger" | "2" => Self::Ranger,
-            _ => Self::Vanguard,
-        }
+    #[test]
+    fn adventurer_ranks_advance_at_their_documented_thresholds() {
+        assert_eq!(AdventurerRank::from_points(-1), AdventurerRank::H);
+        assert_eq!(AdventurerRank::from_points(99), AdventurerRank::H);
+        assert_eq!(AdventurerRank::from_points(100), AdventurerRank::G);
+        assert_eq!(AdventurerRank::from_points(9_999), AdventurerRank::SS);
+        assert_eq!(AdventurerRank::from_points(10_000), AdventurerRank::SSS);
+        assert_eq!(AdventurerRank::SSS.next_threshold_points(), None);
+        assert_eq!(AdventurerRank::from_code("SSS"), Some(AdventurerRank::SSS));
+        assert_eq!(AdventurerRank::from_code("X"), None);
     }
 
-    pub const fn as_code(self) -> &'static str {
-        match self {
-            Self::Vanguard => "vanguard",
-            Self::Arcanist => "arcanist",
-            Self::Ranger => "ranger",
-        }
-    }
-
-    pub const fn base_hp(self) -> i32 {
-        match self {
-            Self::Vanguard => 160,
-            Self::Arcanist => 110,
-            Self::Ranger => 130,
-        }
-    }
-
-    pub const fn base_mp(self) -> i32 {
-        match self {
-            Self::Vanguard => 70,
-            Self::Arcanist => 140,
-            Self::Ranger => 95,
-        }
-    }
-
-    pub const fn move_speed(self) -> f32 {
-        match self {
-            Self::Vanguard => 9.2,
-            Self::Arcanist => 8.8,
-            Self::Ranger => 10.4,
-        }
-    }
-
-    pub const fn attack_range(self) -> f32 {
-        match self {
-            Self::Vanguard => 4.6,
-            Self::Arcanist => 14.5,
-            Self::Ranger => 13.0,
-        }
-    }
-
-    pub const fn base_damage(self) -> i32 {
-        match self {
-            Self::Vanguard => 24,
-            Self::Arcanist => 26,
-            Self::Ranger => 22,
-        }
-    }
-
-    pub const fn accent_rgb(self) -> u32 {
-        match self {
-            Self::Vanguard => 0xF59E0B,
-            Self::Arcanist => 0x38BDF8,
-            Self::Ranger => 0x10B981,
-        }
-    }
-
-    pub const fn primary_rgb(self) -> u32 {
-        match self {
-            Self::Vanguard => 0xC27824,
-            Self::Arcanist => 0x1D4ED8,
-            Self::Ranger => 0x15803D,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum MobKind {
-    Stalker = 0,
-    Wisp = 1,
-    Sentinel = 2,
-    Colossus = 3,
-}
-
-impl MobKind {
-    pub fn from_str_code(s: &str) -> Self {
-        match s {
-            "wisp" | "1" => Self::Wisp,
-            "sentinel" | "2" => Self::Sentinel,
-            "colossus" | "3" => Self::Colossus,
-            _ => Self::Stalker,
-        }
-    }
-
-    pub const fn as_code(self) -> &'static str {
-        match self {
-            Self::Stalker => "stalker",
-            Self::Wisp => "wisp",
-            Self::Sentinel => "sentinel",
-            Self::Colossus => "colossus",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ZoneId {
-    Plaza,
-    Woods,
-    Citadel,
-    Veins,
-}
-
-pub fn zone_at(x: f32, z: f32) -> ZoneId {
-    let dist = sqrt_f32(x * x + z * z);
-    if dist < 18.0 {
-        ZoneId::Plaza
-    } else if z < -34.0 && abs_f32(x) < 34.0 {
-        ZoneId::Citadel
-    } else if x > 20.0 {
-        ZoneId::Veins
-    } else {
-        ZoneId::Woods
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct PlayerSnapshot {
-    pub id: String,
-    pub name: String,
-    pub class_id: ClassId,
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub yaw: f32,
-    pub moving: bool,
-    pub hp: i32,
-    pub max_hp: i32,
-    pub mp: i32,
-    pub max_mp: i32,
-    pub level: i32,
-    pub xp: i32,
-    pub xp_next: i32,
-    pub gold: i32,
-    pub attack_tick: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct MobSnapshot {
-    pub id: String,
-    pub kind: MobKind,
-    pub name: String,
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub yaw: f32,
-    pub hp: i32,
-    pub max_hp: i32,
-    pub level: i32,
-    pub alive: bool,
-    pub attack_tick: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct CrystalSnapshot {
-    pub id: String,
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub available: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct CombatFx {
-    pub attacker_id: String,
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub skill: u8,
-    pub class_id: ClassId,
-    pub damage: i32,
-    pub crit: bool,
-    pub heal: i32,
-    pub xp_gained: i32,
-    pub gold_gained: i32,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChatEntry {
-    pub sender_id: String,
-    pub sender_name: String,
-    pub class_id: ClassId,
-    pub text: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum ClientPacket {
-    Join {
-        name: String,
-        class_id: ClassId,
-    },
-    Move {
-        x: f32,
-        y: f32,
-        z: f32,
-        yaw: f32,
-        moving: bool,
-    },
-    Attack {
-        skill: u8,
-        target_id: String,
-        yaw: f32,
-    },
-    Gather {
-        crystal_id: String,
-    },
-    Chat {
-        text: String,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub enum ServerPacket {
-    Init { self_id: String },
-    Player(PlayerSnapshot),
-    Mob(MobSnapshot),
-    Crystal(CrystalSnapshot),
-    PlayerLeft { id: String },
-    CombatFx(CombatFx),
-    LevelUp { id: String, level: i32 },
-    Chat(ChatEntry),
-    SnapshotEnd,
-}
-
-pub fn sanitize_field(s: &str, max_len: usize) -> String {
-    let mut out = String::new();
-    for c in s.chars() {
-        if c == '|' || c == '\n' || c == '\r' {
-            continue;
-        }
-        if out.len() + c.len_utf8() > max_len {
-            break;
-        }
-        out.push(c);
-    }
-    out
-}
-
-impl ClientPacket {
-    pub fn encode(&self) -> String {
-        match self {
-            Self::Join { name, class_id } => {
-                format!("JOIN|{}|{}", sanitize_field(name, 18), class_id.as_code())
-            }
-            Self::Move {
-                x,
-                y,
-                z,
-                yaw,
-                moving,
-            } => {
-                let m = if *moving { 1 } else { 0 };
-                format!("MOVE|{:.3}|{:.3}|{:.3}|{:.3}|{}", x, y, z, yaw, m)
-            }
-            Self::Attack {
-                skill,
-                target_id,
-                yaw,
-            } => {
-                format!("ATK|{}|{}|{:.3}", skill, sanitize_field(target_id, 24), yaw)
-            }
-            Self::Gather { crystal_id } => {
-                format!("GATH|{}", sanitize_field(crystal_id, 24))
-            }
-            Self::Chat { text } => {
-                format!("CHAT|{}", sanitize_field(text, 140))
-            }
-        }
-    }
-
-    pub fn decode(line: &str) -> Option<Self> {
-        let parts: Vec<&str> = line.trim().split('|').collect();
-        match parts.first().copied()? {
-            "JOIN" if parts.len() >= 3 => Some(Self::Join {
-                name: sanitize_field(parts[1], 18),
-                class_id: ClassId::from_str_code(parts[2]),
-            }),
-            "MOVE" if parts.len() >= 6 => Some(Self::Move {
-                x: parts[1].parse().ok()?,
-                y: parts[2].parse().ok()?,
-                z: parts[3].parse().ok()?,
-                yaw: parts[4].parse().ok()?,
-                moving: parts[5] == "1",
-            }),
-            "ATK" if parts.len() >= 4 => Some(Self::Attack {
-                skill: parts[1].parse().ok()?,
-                target_id: parts[2].to_string(),
-                yaw: parts[3].parse().ok()?,
-            }),
-            "GATH" if parts.len() >= 2 => Some(Self::Gather {
-                crystal_id: parts[1].to_string(),
-            }),
-            "CHAT" if parts.len() >= 2 => Some(Self::Chat {
-                text: sanitize_field(parts[1], 140),
-            }),
-            _ => None,
-        }
-    }
-}
-
-impl ServerPacket {
-    pub fn encode(&self) -> String {
-        match self {
-            Self::Init { self_id } => format!("INIT|{}", self_id),
-            Self::Player(p) => format!(
-                "PLR|{}|{}|{}|{:.3}|{:.3}|{:.3}|{:.3}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-                p.id,
-                sanitize_field(&p.name, 18),
-                p.class_id.as_code(),
-                p.x,
-                p.y,
-                p.z,
-                p.yaw,
-                if p.moving { 1 } else { 0 },
-                p.hp,
-                p.max_hp,
-                p.mp,
-                p.max_mp,
-                p.level,
-                p.xp,
-                p.xp_next,
-                p.gold,
-                p.attack_tick
+    #[test]
+    fn emote_packets_accept_only_known_emote_codes() {
+        assert!(matches!(
+            ClientPacket::decode(
+                &ClientPacket::Emote {
+                    emote: EmoteId::Wave
+                }
+                .encode()
             ),
-            Self::Mob(m) => format!(
-                "MOB|{}|{}|{}|{:.3}|{:.3}|{:.3}|{:.3}|{}|{}|{}|{}|{}",
-                m.id,
-                m.kind.as_code(),
-                m.name,
-                m.x,
-                m.y,
-                m.z,
-                m.yaw,
-                m.hp,
-                m.max_hp,
-                m.level,
-                if m.alive { 1 } else { 0 },
-                m.attack_tick
+            Some(ClientPacket::Emote {
+                emote: EmoteId::Wave
+            })
+        ));
+        assert!(matches!(
+            ServerPacket::decode(
+                &ServerPacket::Emote {
+                    player_id: String::from("hero_1"),
+                    emote: EmoteId::Dance,
+                }
+                .encode()
             ),
-            Self::Crystal(c) => format!(
-                "CRYS|{}|{:.3}|{:.3}|{:.3}|{}",
-                c.id,
-                c.x,
-                c.y,
-                c.z,
-                if c.available { 1 } else { 0 }
+            Some(ServerPacket::Emote {
+                player_id,
+                emote: EmoteId::Dance,
+            }) if player_id == "hero_1"
+        ));
+        assert!(ClientPacket::decode("EMOTE|unknown").is_none());
+    }
+
+    #[test]
+    fn player_packets_preserve_rank_points_and_decode_legacy_snapshots() {
+        let player = PlayerSnapshot {
+            id: String::from("hero_1"),
+            name: String::from("Traveler"),
+            class_id: ClassId::Vanguard,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            moving: false,
+            hp: 100,
+            max_hp: 100,
+            mp: 70,
+            max_mp: 70,
+            level: 1,
+            xp: 0,
+            xp_next: 100,
+            gold: 0,
+            rank_points: 321,
+            attack_tick: 12,
+            shield_hp: 27,
+            haste: true,
+        };
+        assert!(matches!(
+            ServerPacket::decode(&ServerPacket::Player(player).encode()),
+            Some(ServerPacket::Player(PlayerSnapshot {
+                rank_points: 321,
+                attack_tick: 12,
+                shield_hp: 27,
+                haste: true,
+                ..
+            }))
+        ));
+
+        assert!(matches!(
+            ServerPacket::decode(
+                "PLR|hero_1|Traveler|vanguard|0|0|0|0|0|100|100|70|70|1|0|100|0|12"
             ),
-            Self::PlayerLeft { id } => format!("LEFT|{}", id),
-            Self::CombatFx(fx) => format!(
-                "FX|{}|{:.3}|{:.3}|{:.3}|{}|{}|{}|{}|{}|{}|{}",
-                fx.attacker_id,
-                fx.x,
-                fx.y,
-                fx.z,
-                fx.skill,
-                fx.class_id.as_code(),
-                fx.damage,
-                if fx.crit { 1 } else { 0 },
-                fx.heal,
-                fx.xp_gained,
-                fx.gold_gained
+            Some(ServerPacket::Player(PlayerSnapshot {
+                rank_points: 0,
+                attack_tick: 12,
+                shield_hp: 0,
+                haste: false,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn guardian_class_code_and_stats_are_available() {
+        assert_eq!(ClassId::from_str_code("guardian"), ClassId::Guardian);
+        assert_eq!(ClassId::from_str_code("3"), ClassId::Guardian);
+        assert_eq!(ClassId::Guardian.as_code(), "guardian");
+        assert!(ClassId::Guardian.base_hp() > ClassId::Vanguard.base_hp());
+        assert!(ClassId::Guardian.base_damage() < ClassId::Vanguard.base_damage());
+    }
+
+    #[test]
+    fn new_anime_classes_round_trip_and_have_distinct_stats() {
+        let classes = [
+            ("duelist", ClassId::Duelist),
+            ("summoner", ClassId::Summoner),
+            ("artificer", ClassId::Artificer),
+            ("chronicler", ClassId::Chronicler),
+            ("berserker", ClassId::Berserker),
+        ];
+        for (code, class_id) in classes {
+            assert_eq!(ClassId::from_str_code(code), class_id);
+            assert_eq!(ClassId::from_str_code(class_id.as_code()), class_id);
+        }
+        assert!(ClassId::Duelist.move_speed() > ClassId::Ranger.move_speed());
+        assert!(ClassId::Berserker.base_damage() > ClassId::Vanguard.base_damage());
+        assert!(ClassId::Chronicler.base_mp() > ClassId::Arcanist.base_mp());
+    }
+
+    #[test]
+    fn rank_up_packets_round_trip() {
+        assert!(matches!(
+            ServerPacket::decode(
+                &ServerPacket::RankUp {
+                    id: String::from("hero_1"),
+                    rank: AdventurerRank::SSS,
+                }
+                .encode()
             ),
-            Self::LevelUp { id, level } => format!("LVL|{}|{}", id, level),
-            Self::Chat(c) => format!(
-                "CHAT|{}|{}|{}|{}",
-                c.sender_id,
-                sanitize_field(&c.sender_name, 18),
-                c.class_id.as_code(),
-                sanitize_field(&c.text, 140)
-            ),
-            Self::SnapshotEnd => String::from("SNAP_END"),
-        }
+            Some(ServerPacket::RankUp {
+                id,
+                rank: AdventurerRank::SSS,
+            }) if id == "hero_1"
+        ));
     }
 
-    pub fn decode(line: &str) -> Option<Self> {
-        let parts: Vec<&str> = line.trim().split('|').collect();
-        match parts.first().copied()? {
-            "INIT" if parts.len() >= 2 => Some(Self::Init {
-                self_id: parts[1].to_string(),
-            }),
-            "PLR" if parts.len() >= 18 => Some(Self::Player(PlayerSnapshot {
-                id: parts[1].to_string(),
-                name: parts[2].to_string(),
-                class_id: ClassId::from_str_code(parts[3]),
-                x: parts[4].parse().ok()?,
-                y: parts[5].parse().ok()?,
-                z: parts[6].parse().ok()?,
-                yaw: parts[7].parse().ok()?,
-                moving: parts[8] == "1",
-                hp: parts[9].parse().ok()?,
-                max_hp: parts[10].parse().ok()?,
-                mp: parts[11].parse().ok()?,
-                max_mp: parts[12].parse().ok()?,
-                level: parts[13].parse().ok()?,
-                xp: parts[14].parse().ok()?,
-                xp_next: parts[15].parse().ok()?,
-                gold: parts[16].parse().ok()?,
-                attack_tick: parts[17].parse().ok()?,
-            })),
-            "MOB" if parts.len() >= 13 => Some(Self::Mob(MobSnapshot {
-                id: parts[1].to_string(),
-                kind: MobKind::from_str_code(parts[2]),
-                name: parts[3].to_string(),
-                x: parts[4].parse().ok()?,
-                y: parts[5].parse().ok()?,
-                z: parts[6].parse().ok()?,
-                yaw: parts[7].parse().ok()?,
-                hp: parts[8].parse().ok()?,
-                max_hp: parts[9].parse().ok()?,
-                level: parts[10].parse().ok()?,
-                alive: parts[11] == "1",
-                attack_tick: parts[12].parse().ok()?,
-            })),
-            "CRYS" if parts.len() >= 6 => Some(Self::Crystal(CrystalSnapshot {
-                id: parts[1].to_string(),
-                x: parts[2].parse().ok()?,
-                y: parts[3].parse().ok()?,
-                z: parts[4].parse().ok()?,
-                available: parts[5] == "1",
-            })),
-            "LEFT" if parts.len() >= 2 => Some(Self::PlayerLeft {
-                id: parts[1].to_string(),
-            }),
-            "FX" if parts.len() >= 12 => Some(Self::CombatFx(CombatFx {
-                attacker_id: parts[1].to_string(),
-                x: parts[2].parse().ok()?,
-                y: parts[3].parse().ok()?,
-                z: parts[4].parse().ok()?,
-                skill: parts[5].parse().ok()?,
-                class_id: ClassId::from_str_code(parts[6]),
-                damage: parts[7].parse().ok()?,
-                crit: parts[8] == "1",
-                heal: parts[9].parse().ok()?,
-                xp_gained: parts[10].parse().ok()?,
-                gold_gained: parts[11].parse().ok()?,
-            })),
-            "LVL" if parts.len() >= 3 => Some(Self::LevelUp {
-                id: parts[1].to_string(),
-                level: parts[2].parse().ok()?,
-            }),
-            "CHAT" if parts.len() >= 5 => Some(Self::Chat(ChatEntry {
-                sender_id: parts[1].to_string(),
-                sender_name: parts[2].to_string(),
-                class_id: ClassId::from_str_code(parts[3]),
-                text: parts[4].to_string(),
-            })),
-            "SNAP_END" => Some(Self::SnapshotEnd),
-            _ => None,
-        }
-    }
-}
+    #[test]
+    fn tree_collision_stops_swept_movement_at_the_trunk() {
+        let (tree_x, tree_z) = forest_tree_position(0).expect("first forest tree");
+        let (x, z) = move_with_tree_collision(tree_x - 3.0, tree_z, tree_x + 3.0, tree_z);
 
-/// Deterministic `#![no_std]` terrain height shared by Rust server, native player, and WASM preview.
-pub fn ground_height_at(x: f32, z: f32) -> f32 {
-    let dist_sq = x * x + z * z;
-    if dist_sq < 225.0 {
-        return 0.0;
-    }
-    let dist = sqrt_f32(dist_sq);
-    let blend = clamp_f32((dist - 15.0) / 14.0, 0.0, 1.0);
-    let hill = sin_approx(x * 0.055) * cos_approx(z * 0.055) * 2.4
-        + sin_approx((x + z) * 0.09) * 0.8;
-    let rim = if dist > 82.0 {
-        let t = (dist - 82.0) / 16.0;
-        t * t * 9.0
-    } else {
-        0.0
-    };
-    hill * blend + rim
-}
-
-#[inline]
-pub fn clamp_f32(v: f32, lo: f32, hi: f32) -> f32 {
-    if v < lo {
-        lo
-    } else if v > hi {
-        hi
-    } else {
-        v
-    }
-}
-
-#[inline]
-pub fn abs_f32(v: f32) -> f32 {
-    if v < 0.0 { -v } else { v }
-}
-
-#[inline]
-pub fn floor_f32(x: f32) -> i32 {
-    let i = x as i32;
-    if (i as f32) > x { i - 1 } else { i }
-}
-
-#[inline]
-pub fn ceil_f32(x: f32) -> i32 {
-    let i = x as i32;
-    if (i as f32) < x { i + 1 } else { i }
-}
-
-#[inline]
-pub fn sqrt_f32(x: f32) -> f32 {
-    if x <= 0.0 {
-        return 0.0;
-    }
-    let mut guess = x * 0.5 + 0.5;
-    let mut i = 0;
-    while i < 7 {
-        guess = 0.5 * (guess + x / guess);
-        i += 1;
-    }
-    guess
-}
-
-#[inline]
-pub fn sin_approx(mut x: f32) -> f32 {
-    const PI: f32 = 3.14159265;
-    const TWO_PI: f32 = 6.2831853;
-    while x > PI {
-        x -= TWO_PI;
-    }
-    while x < -PI {
-        x += TWO_PI;
-    }
-    let b = 4.0 / PI;
-    let c = -4.0 / (PI * PI);
-    let y = b * x + c * x * abs_f32(x);
-    0.225 * (y * abs_f32(y) - y) + y
-}
-
-#[inline]
-pub fn cos_approx(x: f32) -> f32 {
-    sin_approx(x + 1.5707963)
-}
-
-pub fn atan2_approx(y: f32, x: f32) -> f32 {
-    const PI: f32 = 3.14159265;
-    if x == 0.0 {
-        if y > 0.0 {
-            return PI * 0.5;
-        }
-        if y < 0.0 {
-            return -PI * 0.5;
-        }
-        return 0.0;
-    }
-    let z = y / x;
-    let az = abs_f32(z);
-    let atan = if az < 1.0 {
-        z / (1.0 + 0.28 * z * z)
-    } else {
-        let sign = if z > 0.0 { 1.0 } else { -1.0 };
-        sign * (PI * 0.5) - z / (z * z + 0.28)
-    };
-    if x < 0.0 {
-        if y >= 0.0 {
-            atan + PI
-        } else {
-            atan - PI
-        }
-    } else {
-        atan
-    }
-}
-
-// =========================================================================
-// aethravox/Lang Integration (6-Language Offline MMO UI + LangButton Host)
-// =========================================================================
-
-pub static MMO_CATALOG: LangCatalog = LangCatalog::new(&[
-    CatalogEntry::new(
-        lang::fnv1a_64("WAYFARERS ONLINE (WFO)".as_bytes()),
-        "WAYFARERS ONLINE (WFO)",
-        [
-            "WAYFARERS ONLINE (WFO)",
-            "WAYFARERS ONLINE (WFO)",
-            "WAYFARERS ONLINE (WFO)",
-            "WAYFARERS ONLINE (WFO)",
-            "WAYFARERS ONLINE (WFO)",
-            "WAYFARERS ONLINE (WFO)",
-        ],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("ENTRAR AL MUNDO".as_bytes()),
-        "ENTRAR AL MUNDO",
-        [
-            "ENTRAR AL MUNDO",
-            "ENTER WORLD",
-            "ENTRAR NO MUNDO",
-            "ENTRER DANS LE MONDE",
-            "WELT BETRETEN",
-            "ENTRA NEL MONDO",
-        ],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("NOMBRE".as_bytes()),
-        "NOMBRE",
-        ["NOMBRE", "NAME", "NOME", "NOM", "NAME", "NOME"],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("VANGUARDIA".as_bytes()),
-        "VANGUARDIA",
-        [
-            "VANGUARDIA",
-            "VANGUARD",
-            "VANGUARDA",
-            "AVANT-GARDE",
-            "VORHUT",
-            "AVANGUARDIA",
-        ],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("ARCANISTA".as_bytes()),
-        "ARCANISTA",
-        [
-            "ARCANISTA",
-            "ARCANIST",
-            "ARCANISTA",
-            "ARCANISTE",
-            "ARKANIST",
-            "ARCANISTA",
-        ],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("MONTARAZ".as_bytes()),
-        "MONTARAZ",
-        [
-            "MONTARAZ",
-            "RANGER",
-            "PATRULHEIRO",
-            "RODEUR",
-            "WALDLAUFER",
-            "GUARDABOSCHI",
-        ],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("GOLPE".as_bytes()),
-        "GOLPE",
-        ["GOLPE", "STRIKE", "GOLPE", "FRAPPE", "SCHLAG", "COLPO"],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("NOVA".as_bytes()),
-        "NOVA",
-        ["NOVA", "SKILL", "SKILL", "SORT", "SKILL", "SKILL"],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("CURAR".as_bytes()),
-        "CURAR",
-        ["CURAR", "MEND", "CURAR", "SOIN", "HEILEN", "CURA"],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("MINAR".as_bytes()),
-        "MINAR",
-        ["MINAR", "GATHER", "COLETAR", "MINER", "SAMMELN", "MINARE"],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("PLAZA SANTUARIO".as_bytes()),
-        "PLAZA SANTUARIO",
-        [
-            "PLAZA SANTUARIO",
-            "SANCTUARY PLAZA",
-            "PRACA SANTUARIO",
-            "PLACE SANCTUAIRE",
-            "ZUFLUCHTSPLATZ",
-            "PIAZZA SANTUARIO",
-        ],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("BOSQUE ESMERALDA".as_bytes()),
-        "BOSQUE ESMERALDA",
-        [
-            "BOSQUE ESMERALDA",
-            "EMERALD WOODS",
-            "BOSQUE ESMERALDA",
-            "BOIS EMERAUDE",
-            "SMARAGDWALD",
-            "BOSCO SMERALDO",
-        ],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("CIUDADELA".as_bytes()),
-        "CIUDADELA",
-        [
-            "CIUDADELA",
-            "CITADEL",
-            "CIDADELA",
-            "CITADELLE",
-            "ZITADELLE",
-            "CITTADELLA",
-        ],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("VETAS CRISTAL".as_bytes()),
-        "VETAS CRISTAL",
-        [
-            "VETAS CRISTAL",
-            "CRYSTAL VEINS",
-            "VEIOS CRISTAL",
-            "VEINES CRISTAL",
-            "KRISTALLADERN",
-            "VENE CRISTALLO",
-        ],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("EN LINEA".as_bytes()),
-        "EN LINEA",
-        [
-            "EN LINEA",
-            "ONLINE",
-            "ONLINE",
-            "EN LIGNE",
-            "ONLINE",
-            "ONLINE",
-        ],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("ORO".as_bytes()),
-        "ORO",
-        ["ORO", "GOLD", "OURO", "OR", "GOLD", "ORO"],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("CHAT".as_bytes()),
-        "CHAT",
-        ["CHAT", "CHAT", "CHAT", "CHAT", "CHAT", "CHAT"],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("SALTAR".as_bytes()),
-        "SALTAR",
-        ["SALTAR", "JUMP", "PULAR", "SAUTER", "SPRINGEN", "SALTA"],
-    ),
-    CatalogEntry::new(
-        lang::fnv1a_64("TACTIL".as_bytes()),
-        "TACTIL",
-        ["TACTIL", "TOUCH", "TOQUE", "TACTILE", "TOUCH", "TOUCH"],
-    ),
-]);
-
-#[lang::app]
-mod auto_labels {
-    pub fn basics() -> [&'static str; 2] {
-        ["Conectar", "Enviar"]
-    }
-}
-
-pub struct MmoLangHost {
-    pub slot: Rect,
-    pub btn_bounds: Rect,
-    pub btn_label: &'static str,
-    pub current: Language,
-}
-
-impl MmoLangHost {
-    pub fn new(slot: Rect) -> Self {
-        Self {
-            slot,
-            btn_bounds: slot,
-            btn_label: "ES",
-            current: Language::Es,
-        }
-    }
-}
-
-impl LangHost for MmoLangHost {
-    fn ready_slot(&self) -> Rect {
-        self.slot
+        assert!(x < tree_x);
+        assert!(((x - tree_x).powi(2) + (z - tree_z).powi(2)).sqrt() >= TREE_COLLISION_RADIUS);
     }
 
-    fn draw_lang_button(&mut self, view: &ButtonView<'_>) {
-        self.btn_bounds = view.bounds;
-        self.btn_label = view.label;
+    #[test]
+    fn tree_collision_sweeps_only_the_shared_visible_trees() {
+        let visible_tree_count = (0..FOREST_TREE_COUNT)
+            .filter(|&index| forest_tree_position(index).is_some())
+            .count();
+        assert!(visible_tree_count > 0 && visible_tree_count < FOREST_TREE_COUNT);
+        assert!(forest_tree_position(FOREST_TREE_COUNT).is_none());
     }
 
-    fn on_language_changed(&mut self, new_lang: Language) {
-        self.current = new_lang;
-    }
-}
+    #[test]
+    fn account_auth_packets_round_trip_without_exposing_other_fields() {
+        let packet = ClientPacket::RegisterAccount {
+            username: String::from("Player_01"),
+            password: String::from("correct horse battery"),
+        };
+        let encoded = packet.encode();
+        assert!(matches!(
+            ClientPacket::decode(&encoded),
+            Some(ClientPacket::RegisterAccount { username, password })
+                if username == "Player_01" && password == "correct horse battery"
+        ));
 
-pub struct MmoLangController {
-    pub host: MmoLangHost,
-    pub button: LangButton,
-}
-
-impl MmoLangController {
-    pub fn new(slot: Rect) -> Self {
-        lang::install_overrides(&MMO_CATALOG);
-        lang::set_language(Language::Es);
-        let mut host = MmoLangHost::new(slot);
-        let button = LangButton::mount_in_slot(
-            &Language::ALL,
-            ButtonMode::Cycle,
-            LabelStyle::CodeOnly,
-            &mut host,
-        );
-        Self { host, button }
-    }
-
-    pub fn set_slot(&mut self, slot: Rect) {
-        self.host.slot = slot;
-        self.host.btn_bounds = slot;
-    }
-
-    pub fn handle_tap(&mut self, x: i32, y: i32) -> bool {
-        if self.host.btn_bounds.contains(x, y) {
-            self.button.handle_event(UiEvent::Click, &mut self.host)
-        } else {
-            false
-        }
+        let response = ServerPacket::AuthSuccess {
+            username: String::from("player_01"),
+            class_id: ClassId::Arcanist,
+            level: 4,
+            xp: 25,
+            xp_next: 300,
+            gold: 90,
+        };
+        assert!(matches!(
+            ServerPacket::decode(&response.encode()),
+            Some(ServerPacket::AuthSuccess {
+                username,
+                class_id: ClassId::Arcanist,
+                level: 4,
+                xp: 25,
+                xp_next: 300,
+                gold: 90,
+            }) if username == "player_01"
+        ));
     }
 
-    pub fn cycle(&mut self) {
-        self.button.handle_event(UiEvent::Click, &mut self.host);
-    }
-
-    pub fn tr(&self, key: &'static str) -> &'static str {
-        lang::tr(key)
-    }
-
-    pub fn tr_auto_connect(&self) -> &'static str {
-        auto_labels::basics()[0]
+    #[test]
+    fn server_can_report_secure_connection_state() {
+        assert!(matches!(
+            ServerPacket::decode(&ServerPacket::ConnectionStatus { connected: false }.encode()),
+            Some(ServerPacket::ConnectionStatus { connected: false })
+        ));
     }
 }

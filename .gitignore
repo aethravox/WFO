@@ -1,1 +1,10 @@
 target/
+dist/
+node_modules/
+*.sqlite3
+.wfo-certs/
+android/.gradle/
+android/build/
+android/app/build/
+android/jniLibs/
+android/local.properties

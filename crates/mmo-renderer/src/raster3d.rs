@@ -1,7 +1,7 @@
+use crate::font::TtfUiFont;
 use alloc::vec;
 use alloc::vec::Vec;
 use mmo_protocol::{abs_f32, ceil_f32, cos_approx, floor_f32, sin_approx, sqrt_f32};
-use crate::font::glyph_5x7;
 
 #[derive(Clone, Copy)]
 pub struct Vec3 {
@@ -105,7 +105,19 @@ pub struct Framebuffer {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<u32>,
+    pub gpu_background_pixels: Vec<u32>,
     pub depth: Vec<f32>,
+    pub scene_vertices: Vec<SceneVertex>,
+    pub ui_pixels: Vec<u32>,
+    gpu_scene_mode: bool,
+    ui_capture: bool,
+    ui_font: TtfUiFont,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SceneVertex {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
 }
 
 const SUN_DIR: Vec3 = Vec3 {
@@ -121,7 +133,13 @@ impl Framebuffer {
             width,
             height,
             pixels: vec![0; len],
+            gpu_background_pixels: vec![0; len],
             depth: vec![1e9; len],
+            scene_vertices: Vec::new(),
+            ui_pixels: vec![0; len],
+            gpu_scene_mode: false,
+            ui_capture: false,
+            ui_font: TtfUiFont::new(),
         }
     }
 
@@ -133,22 +151,71 @@ impl Framebuffer {
         self.height = height;
         let len = width * height;
         self.pixels.resize(len, 0);
+        self.gpu_background_pixels.resize(len, 0);
         self.depth.resize(len, 1e9);
+        self.ui_pixels.resize(len, 0);
     }
 
     pub fn clear_sky(&mut self) {
         self.depth.fill(1e9);
+        self.scene_vertices.clear();
+        self.ui_pixels.fill(0);
+        self.ui_capture = false;
         let h = self.height.max(1);
         for y in 0..self.height {
             let t = y as f32 / h as f32;
-            // Atmospheric horizon gradient (#3b6590 -> #769ec4)
+            // Atmospheric horizon gradient with warmer daylight near the horizon.
             let r = (55.0 + t * 65.0) as u32;
-            let g = (95.0 + t * 68.0) as u32;
-            let b = (142.0 + t * 58.0) as u32;
+            let g = (95.0 + t * 78.0) as u32;
+            let b = (142.0 + t * 66.0) as u32;
             let col = (r << 16) | (g << 8) | b;
             let row_start = y * self.width;
             let row_end = row_start + self.width;
             self.pixels[row_start..row_end].fill(col);
+        }
+
+        // Soft sun disc and a few thin clouds give the world a more readable sky.
+        let sun_x = (self.width as i32 * 78) / 100;
+        let sun_y = (self.height as i32 * 18) / 100;
+        for dy in -14..=14 {
+            for dx in -14..=14 {
+                let d2 = dx * dx + dy * dy;
+                if d2 <= 196 {
+                    let x = sun_x + dx;
+                    let y = sun_y + dy;
+                    if x >= 0 && y >= 0 && x < self.width as i32 && y < self.height as i32 {
+                        let glow = if d2 <= 90 { 0xFFF4C4 } else { 0xF6D58A };
+                        self.pixels[(y as usize) * self.width + x as usize] = glow;
+                    }
+                }
+            }
+        }
+        let cloud_rows = [
+            ((self.height as i32 * 12) / 100).max(18),
+            ((self.height as i32 * 27) / 100).max(48),
+        ];
+        for (idx, cy) in cloud_rows.iter().enumerate() {
+            let cx = if idx == 0 {
+                (self.width as i32 * 18) / 100
+            } else {
+                (self.width as i32 * 56) / 100
+            };
+            for oy in -2..=2 {
+                for ox in -34..=34 {
+                    let x = cx + ox;
+                    let y = cy + oy;
+                    let edge = (ox * ox) / 1152 + (oy * oy) / 5;
+                    if edge < 1
+                        && x >= 0
+                        && y >= 0
+                        && x < self.width as i32
+                        && y < self.height as i32
+                    {
+                        self.pixels[(y as usize) * self.width + x as usize] = 0xEAF2F7;
+                    }
+                }
+            }
+            self.gpu_background_pixels.copy_from_slice(&self.pixels);
         }
     }
 
@@ -181,7 +248,15 @@ impl Framebuffer {
         (((r as u32) & 0xFF) << 16) | (((g as u32) & 0xFF) << 8) | ((b as u32) & 0xFF)
     }
 
-    pub fn draw_triangle(&mut self, cam: &Camera, p0: Vec3, p1: Vec3, p2: Vec3, base_rgb: u32, emissive: bool) {
+    pub fn draw_triangle(
+        &mut self,
+        cam: &Camera,
+        p0: Vec3,
+        p1: Vec3,
+        p2: Vec3,
+        base_rgb: u32,
+        emissive: bool,
+    ) {
         let c0 = cam.world_to_cam(p0);
         let c1 = cam.world_to_cam(p1);
         let c2 = cam.world_to_cam(p2);
@@ -225,6 +300,26 @@ impl Framebuffer {
         let avg_z = (c0.z + c1.z + c2.z) * 0.333333;
         let col = Self::shade_color(base_rgb, normal, avg_z, emissive);
 
+        if self.gpu_scene_mode {
+            let color = [
+                ((col >> 16) & 0xFF) as f32 / 255.0,
+                ((col >> 8) & 0xFF) as f32 / 255.0,
+                (col & 0xFF) as f32 / 255.0,
+            ];
+            let projected = [(x0, y0, c0.z), (x1, y1, c1.z), (x2, y2, c2.z)];
+            for (x, y, depth) in projected {
+                self.scene_vertices.push(SceneVertex {
+                    position: [
+                        (x / w) * 2.0 - 1.0,
+                        1.0 - (y / h) * 2.0,
+                        (145.0 / 144.65 * (1.0 - 0.35 / depth)).clamp(0.0, 1.0),
+                    ],
+                    color,
+                });
+            }
+            return;
+        }
+
         let inv_area = 1.0 / area;
         let inv_z0 = 1.0 / c0.z;
         let inv_z1 = 1.0 / c1.z;
@@ -251,37 +346,91 @@ impl Framebuffer {
         }
     }
 
-    pub fn draw_quad(&mut self, cam: &Camera, a: Vec3, b: Vec3, c: Vec3, d: Vec3, rgb: u32, emissive: bool) {
+    pub fn draw_quad(
+        &mut self,
+        cam: &Camera,
+        a: Vec3,
+        b: Vec3,
+        c: Vec3,
+        d: Vec3,
+        rgb: u32,
+        emissive: bool,
+    ) {
         self.draw_triangle(cam, a, b, c, rgb, emissive);
         self.draw_triangle(cam, a, c, d, rgb, emissive);
     }
 
-    pub fn draw_box(&mut self, cam: &Camera, center: Vec3, half: Vec3, yaw: f32, rgb: u32, emissive: bool) {
+    pub fn draw_box(
+        &mut self,
+        cam: &Camera,
+        center: Vec3,
+        half: Vec3,
+        yaw: f32,
+        rgb: u32,
+        emissive: bool,
+    ) {
         let corners = [
-            Vec3::new(-half.x, -half.y, -half.z).rotate_y(yaw).add(center),
-            Vec3::new(half.x, -half.y, -half.z).rotate_y(yaw).add(center),
+            Vec3::new(-half.x, -half.y, -half.z)
+                .rotate_y(yaw)
+                .add(center),
+            Vec3::new(half.x, -half.y, -half.z)
+                .rotate_y(yaw)
+                .add(center),
             Vec3::new(half.x, half.y, -half.z).rotate_y(yaw).add(center),
-            Vec3::new(-half.x, half.y, -half.z).rotate_y(yaw).add(center),
-            Vec3::new(-half.x, -half.y, half.z).rotate_y(yaw).add(center),
+            Vec3::new(-half.x, half.y, -half.z)
+                .rotate_y(yaw)
+                .add(center),
+            Vec3::new(-half.x, -half.y, half.z)
+                .rotate_y(yaw)
+                .add(center),
             Vec3::new(half.x, -half.y, half.z).rotate_y(yaw).add(center),
             Vec3::new(half.x, half.y, half.z).rotate_y(yaw).add(center),
             Vec3::new(-half.x, half.y, half.z).rotate_y(yaw).add(center),
         ];
         // Front, Back, Top, Bottom, Right, Left
-        self.draw_quad(cam, corners[4], corners[5], corners[6], corners[7], rgb, emissive);
-        self.draw_quad(cam, corners[1], corners[0], corners[3], corners[2], rgb, emissive);
-        self.draw_quad(cam, corners[3], corners[2], corners[6], corners[7], rgb, emissive);
-        self.draw_quad(cam, corners[0], corners[1], corners[5], corners[4], rgb, emissive);
-        self.draw_quad(cam, corners[5], corners[1], corners[2], corners[6], rgb, emissive);
-        self.draw_quad(cam, corners[0], corners[4], corners[7], corners[3], rgb, emissive);
+        self.draw_quad(
+            cam, corners[4], corners[5], corners[6], corners[7], rgb, emissive,
+        );
+        self.draw_quad(
+            cam, corners[1], corners[0], corners[3], corners[2], rgb, emissive,
+        );
+        self.draw_quad(
+            cam, corners[3], corners[2], corners[6], corners[7], rgb, emissive,
+        );
+        self.draw_quad(
+            cam, corners[0], corners[1], corners[5], corners[4], rgb, emissive,
+        );
+        self.draw_quad(
+            cam, corners[5], corners[1], corners[2], corners[6], rgb, emissive,
+        );
+        self.draw_quad(
+            cam, corners[0], corners[4], corners[7], corners[3], rgb, emissive,
+        );
     }
 
-    pub fn draw_pyramid(&mut self, cam: &Camera, base_center: Vec3, radius: f32, height: f32, yaw: f32, rgb: u32, emissive: bool) {
+    pub fn draw_pyramid(
+        &mut self,
+        cam: &Camera,
+        base_center: Vec3,
+        radius: f32,
+        height: f32,
+        yaw: f32,
+        rgb: u32,
+        emissive: bool,
+    ) {
         let apex = base_center.add(Vec3::new(0.0, height, 0.0));
-        let p0 = Vec3::new(-radius, 0.0, -radius).rotate_y(yaw).add(base_center);
-        let p1 = Vec3::new(radius, 0.0, -radius).rotate_y(yaw).add(base_center);
-        let p2 = Vec3::new(radius, 0.0, radius).rotate_y(yaw).add(base_center);
-        let p3 = Vec3::new(-radius, 0.0, radius).rotate_y(yaw).add(base_center);
+        let p0 = Vec3::new(-radius, 0.0, -radius)
+            .rotate_y(yaw)
+            .add(base_center);
+        let p1 = Vec3::new(radius, 0.0, -radius)
+            .rotate_y(yaw)
+            .add(base_center);
+        let p2 = Vec3::new(radius, 0.0, radius)
+            .rotate_y(yaw)
+            .add(base_center);
+        let p3 = Vec3::new(-radius, 0.0, radius)
+            .rotate_y(yaw)
+            .add(base_center);
         self.draw_triangle(cam, p0, p1, apex, rgb, emissive);
         self.draw_triangle(cam, p1, p2, apex, rgb, emissive);
         self.draw_triangle(cam, p2, p3, apex, rgb, emissive);
@@ -294,14 +443,35 @@ impl Framebuffer {
             let a0 = (i as f32 / segs as f32) * 6.283185;
             let a1 = ((i + 1) as f32 / segs as f32) * 6.283185;
             let p0 = center.add(Vec3::new(cos_approx(a0) * r_in, 0.0, sin_approx(a0) * r_in));
-            let p1 = center.add(Vec3::new(cos_approx(a0) * r_out, 0.0, sin_approx(a0) * r_out));
-            let p2 = center.add(Vec3::new(cos_approx(a1) * r_out, 0.0, sin_approx(a1) * r_out));
+            let p1 = center.add(Vec3::new(
+                cos_approx(a0) * r_out,
+                0.0,
+                sin_approx(a0) * r_out,
+            ));
+            let p2 = center.add(Vec3::new(
+                cos_approx(a1) * r_out,
+                0.0,
+                sin_approx(a1) * r_out,
+            ));
             let p3 = center.add(Vec3::new(cos_approx(a1) * r_in, 0.0, sin_approx(a1) * r_in));
             self.draw_quad(cam, p0, p1, p2, p3, rgb, true);
         }
     }
 
     // 2D HUD Drawing Helpers
+    pub fn set_gpu_scene_mode(&mut self, enabled: bool) {
+        self.gpu_scene_mode = enabled;
+    }
+
+    pub fn begin_ui_capture(&mut self) {
+        self.ui_capture = true;
+        self.ui_pixels.fill(0);
+    }
+
+    pub fn end_ui_capture(&mut self) {
+        self.ui_capture = false;
+    }
+
     pub fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, rgb: u32) {
         let x0 = x.max(0);
         let y0 = y.max(0);
@@ -313,7 +483,11 @@ impl Framebuffer {
         for py in y0..y1 {
             let row = (py as usize) * self.width;
             for px in x0..x1 {
-                self.pixels[row + (px as usize)] = rgb;
+                let idx = row + (px as usize);
+                self.pixels[idx] = rgb;
+                if self.ui_capture {
+                    self.ui_pixels[idx] = 0xFF00_0000 | (rgb & 0x00FF_FFFF);
+                }
             }
         }
     }
@@ -338,8 +512,24 @@ impl Framebuffer {
                 let dr = ((dst >> 16) & 0xFF) * inv + sr * a;
                 let dg = ((dst >> 8) & 0xFF) * inv + sg * a;
                 let db = (dst & 0xFF) * inv + sb * a;
-                self.pixels[row + (px as usize)] =
-                    ((dr / 255) << 16) | ((dg / 255) << 8) | (db / 255);
+                let idx = row + (px as usize);
+                self.pixels[idx] = ((dr / 255) << 16) | ((dg / 255) << 8) | (db / 255);
+                if self.ui_capture {
+                    let old = self.ui_pixels[idx];
+                    let old_a = (old >> 24) & 0xFF;
+                    let out_a = a + (old_a * inv) / 255;
+                    let blend = |src: u32, dst: u32| {
+                        if out_a == 0 {
+                            0
+                        } else {
+                            (src * a + dst * old_a * inv / 255) / out_a
+                        }
+                    };
+                    let r = blend(sr, (old >> 16) & 0xFF);
+                    let g = blend(sg, (old >> 8) & 0xFF);
+                    let b = blend(sb, old & 0xFF);
+                    self.ui_pixels[idx] = (out_a << 24) | (r << 16) | (g << 8) | b;
+                }
             }
         }
     }
@@ -351,38 +541,113 @@ impl Framebuffer {
         self.fill_rect(x + w - 1, y, 1, h, rgb);
     }
 
+    pub fn rounded_panel(&mut self, x: i32, y: i32, w: i32, h: i32, rgb: u32, alpha: u32) {
+        let radius = 8.min(w / 4).min(h / 4);
+        self.fill_rect_alpha(x + radius, y, w - radius * 2, h, rgb, alpha);
+        self.fill_rect_alpha(x, y + radius, w, h - radius * 2, rgb, alpha);
+        self.fill_rect_alpha(
+            x + radius,
+            y + radius,
+            w - radius * 2,
+            h - radius * 2,
+            rgb,
+            alpha,
+        );
+    }
+
+    pub fn panel_border(&mut self, x: i32, y: i32, w: i32, h: i32, rgb: u32) {
+        self.stroke_rect(x, y, w, h, rgb);
+        self.fill_rect(x + 2, y + 2, w - 4, 1, rgb);
+    }
+
+    pub fn draw_text_shadow(&mut self, x: i32, y: i32, text: &str, scale: i32, rgb: u32) {
+        self.draw_text(x + 1, y + 1, text, scale, 0x020617);
+        self.draw_text(x, y, text, scale, rgb);
+    }
+
     pub fn draw_text(&mut self, x: i32, y: i32, text: &str, scale: i32, rgb: u32) {
         let s = scale.max(1);
-        let mut cx = x;
+        let width = self.width;
+        let fb_w = self.width as i32;
+        let fb_h = self.height as i32;
+        let ui_capture = self.ui_capture;
+        let pixels = &mut self.pixels;
+        let ui_pixels = &mut self.ui_pixels;
+        let ui_font = &mut self.ui_font;
+
+        let ascent = ui_font.ascent_px(s);
+        let baseline_y = y + ascent + 1;
+        let sr = (rgb >> 16) & 0xFF;
+        let sg = (rgb >> 8) & 0xFF;
+        let sb = rgb & 0xFF;
+
+        let mut cursor_x = x as f32;
         for ch in text.chars() {
-            if ch == ' ' {
-                cx += 5 * s;
-                continue;
-            }
-            let glyph = glyph_5x7(ch);
-            for (row_idx, &bits) in glyph.iter().enumerate() {
-                for col_idx in 0..5 {
-                    if (bits >> (4 - col_idx)) & 1 == 1 {
-                        self.fill_rect(
-                            cx + (col_idx as i32) * s,
-                            y + (row_idx as i32) * s,
-                            s,
-                            s,
-                            rgb,
-                        );
+            let g = ui_font.glyph(ch, s);
+            let gw = g.metrics.width as i32;
+            let gh = g.metrics.height as i32;
+            let xmin = g.metrics.xmin;
+            let ymin = g.metrics.ymin;
+            let advance = g.metrics.advance_width;
+
+            if gw > 0 && gh > 0 && g.bitmap.len() >= (gw * gh) as usize {
+                let gx0 = floor_f32(cursor_x + 0.5) as i32 + xmin;
+                let gy0 = baseline_y - gh - ymin;
+
+                for row in 0..gh {
+                    let py = gy0 + row;
+                    if py < 0 || py >= fb_h {
+                        continue;
+                    }
+                    let row_off = (py as usize) * width;
+                    let bmp_row = (row * gw) as usize;
+                    for col in 0..gw {
+                        let px = gx0 + col;
+                        if px < 0 || px >= fb_w {
+                            continue;
+                        }
+                        let cov = g.bitmap[bmp_row + col as usize] as u32;
+                        if cov == 0 {
+                            continue;
+                        }
+                        let idx = row_off + (px as usize);
+                        if cov == 255 {
+                            pixels[idx] = rgb;
+                            if ui_capture {
+                                ui_pixels[idx] = 0xFF00_0000 | (rgb & 0x00FF_FFFF);
+                            }
+                        } else {
+                            let inv = 255 - cov;
+                            let dst = pixels[idx];
+                            let dr = (((dst >> 16) & 0xFF) * inv + sr * cov) / 255;
+                            let dg = (((dst >> 8) & 0xFF) * inv + sg * cov) / 255;
+                            let db = ((dst & 0xFF) * inv + sb * cov) / 255;
+                            pixels[idx] = (dr << 16) | (dg << 8) | db;
+                            if ui_capture {
+                                let old = ui_pixels[idx];
+                                let old_a = (old >> 24) & 0xFF;
+                                let out_a = cov + (old_a * inv) / 255;
+                                let blend = |s_c: u32, d_c: u32| {
+                                    if out_a == 0 {
+                                        0
+                                    } else {
+                                        (s_c * cov + d_c * old_a * inv / 255) / out_a
+                                    }
+                                };
+                                let r = blend(sr, (old >> 16) & 0xFF);
+                                let g_c = blend(sg, (old >> 8) & 0xFF);
+                                let b = blend(sb, old & 0xFF);
+                                ui_pixels[idx] = (out_a << 24) | (r << 16) | (g_c << 8) | b;
+                            }
+                        }
                     }
                 }
             }
-            cx += 6 * s;
+            cursor_x += advance;
         }
     }
 
-    pub fn text_width(text: &str, scale: i32) -> i32 {
-        let s = scale.max(1);
-        let mut w = 0;
-        for ch in text.chars() {
-            w += if ch == ' ' { 5 * s } else { 6 * s };
-        }
-        if w > s { w - s } else { 0 }
+    pub fn measure_text(&mut self, text: &str, scale: i32) -> i32 {
+        self.ui_font.measure_text(text, scale)
     }
 }

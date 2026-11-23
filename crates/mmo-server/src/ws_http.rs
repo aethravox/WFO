@@ -1,5 +1,4 @@
 use std::io::{Read, Write};
-use std::net::TcpStream;
 
 /// Minimal pure-std SHA-1 + Base64 + RFC 6455 WebSocket frame helpers
 /// so `aethra-server` serves both native TCP players AND Web Preview WebSockets with zero dependencies.
@@ -101,7 +100,7 @@ pub fn ws_accept_key(client_key: &str) -> String {
     base64_encode(&hash)
 }
 
-pub fn write_ws_text_frame(stream: &mut TcpStream, text: &str) -> std::io::Result<()> {
+pub fn write_ws_text_frame<W: Write>(stream: &mut W, text: &str) -> std::io::Result<()> {
     let payload = text.as_bytes();
     let mut frame = Vec::with_capacity(payload.len() + 10);
     frame.push(0x81); // FIN + Text opcode
@@ -124,7 +123,7 @@ pub enum WsFrame {
     Close,
 }
 
-pub fn read_ws_frame(stream: &mut TcpStream) -> std::io::Result<WsFrame> {
+pub fn read_ws_frame<R: Read>(stream: &mut R) -> std::io::Result<WsFrame> {
     let mut hdr = [0u8; 2];
     stream.read_exact(&mut hdr)?;
     let opcode = hdr[0] & 0x0F;
@@ -142,7 +141,10 @@ pub fn read_ws_frame(stream: &mut TcpStream) -> std::io::Result<WsFrame> {
     }
 
     if len > 65536 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too big"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame too big",
+        ));
     }
 
     let mut mask = [0u8; 4];
@@ -166,7 +168,7 @@ pub fn read_ws_frame(stream: &mut TcpStream) -> std::io::Result<WsFrame> {
     }
 }
 
-pub fn write_ws_pong(stream: &mut TcpStream, payload: &[u8]) -> std::io::Result<()> {
+pub fn write_ws_pong<W: Write>(stream: &mut W, payload: &[u8]) -> std::io::Result<()> {
     let mut frame = Vec::with_capacity(payload.len() + 2);
     frame.push(0x8A);
     frame.push((payload.len().min(125)) as u8);

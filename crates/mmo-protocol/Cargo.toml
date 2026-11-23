@@ -5,4 +5,4 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-lang = { path = "../../Lang/crates/lang", default-features = false, features = ["macros", "atomics"] }
+lang = { package = "langes", version = "0.1.0", default-features = false, features = ["macros", "atomics"] }

@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 mmo-protocol = { path = "../mmo-protocol" }
-lang = { path = "../../Lang/crates/lang", default-features = false, features = ["macros", "atomics"] }
+lang = { package = "langes", version = "0.1.0", default-features = false, features = ["macros", "atomics"] }
+fontdue = { version = "0.9", default-features = false, features = ["hashbrown"] }
