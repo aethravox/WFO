@@ -88,6 +88,8 @@ pub(crate) fn register_player(state: &Arc<Mutex<WorldState>>, sink: ClientSink) 
                 attack_tick: 0,
                 shield_hp: 0,
                 haste: false,
+                has_adventurer_card: false,
+                adventurer_rank: AdventurerRank::H,
             },
             movement_budget: MovementBudget::new(now),
             account_id: None,

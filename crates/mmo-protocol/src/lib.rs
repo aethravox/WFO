@@ -5,6 +5,8 @@ pub const PLAYABLE_RADIUS: f32 = 84.0;
 pub const SAFE_PLAZA_RADIUS: f32 = 16.0;
 pub const FOREST_TREE_COUNT: usize = 56;
 pub const TREE_COLLISION_RADIUS: f32 = 0.7;
+pub const GUILD_POS_X: f32 = -10.5;
+pub const GUILD_POS_Z: f32 = -5.5;
 
 mod language;
 mod math;
@@ -83,6 +85,8 @@ mod tests {
             attack_tick: 12,
             shield_hp: 27,
             haste: true,
+            has_adventurer_card: true,
+            adventurer_rank: AdventurerRank::E,
         };
         assert!(matches!(
             ServerPacket::decode(&ServerPacket::Player(player).encode()),
@@ -91,6 +95,8 @@ mod tests {
                 attack_tick: 12,
                 shield_hp: 27,
                 haste: true,
+                has_adventurer_card: true,
+                adventurer_rank: AdventurerRank::E,
                 ..
             }))
         ));
@@ -104,6 +110,8 @@ mod tests {
                 attack_tick: 12,
                 shield_hp: 0,
                 haste: false,
+                has_adventurer_card: false,
+                adventurer_rank: AdventurerRank::H,
                 ..
             }))
         ));
@@ -202,6 +210,29 @@ mod tests {
                 xp_next: 300,
                 gold: 90,
             }) if username == "player_01"
+        ));
+    }
+
+    #[test]
+    fn guild_packets_round_trip() {
+        assert!(matches!(
+            ClientPacket::decode(&ClientPacket::GuildInteract.encode()),
+            Some(ClientPacket::GuildInteract)
+        ));
+        assert!(matches!(
+            ServerPacket::decode(
+                &ServerPacket::GuildNotice {
+                    kind: 2,
+                    rank: AdventurerRank::G,
+                    missing: 42,
+                }
+                .encode()
+            ),
+            Some(ServerPacket::GuildNotice {
+                kind: 2,
+                rank: AdventurerRank::G,
+                missing: 42,
+            })
         ));
     }
 

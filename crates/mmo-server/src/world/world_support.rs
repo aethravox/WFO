@@ -190,7 +190,7 @@ impl WorldState {
                 CompanionKind::Spirit => 12 + level.saturating_sub(1) * 2,
                 CompanionKind::Turret => 10 + level.saturating_sub(1) * 2,
             };
-            let mut rewards = (0, 0);
+            let mut rewards = (0, 0, 0);
             let effect = {
                 let Some(mob) = self.mobs.get_mut(&mob_id) else {
                     continue;
@@ -206,7 +206,7 @@ impl WorldState {
                         } else {
                             12
                         });
-                    rewards = (mob.xp_reward, mob.gold_reward);
+                    rewards = (mob.xp_reward, mob.gold_reward, mob.rank_points_reward);
                 }
                 CombatFx {
                     attacker_id: player_id.clone(),
@@ -222,8 +222,8 @@ impl WorldState {
                     gold_gained: rewards.1,
                 }
             };
-            if rewards.0 > 0 || rewards.1 > 0 {
-                self.grant_rewards(&player_id, rewards.0, rewards.1);
+            if rewards.0 > 0 || rewards.1 > 0 || rewards.2 > 0 {
+                self.grant_rewards(&player_id, rewards.0, rewards.1, rewards.2);
             }
             self.broadcast(&ServerPacket::CombatFx(effect), None);
         }
@@ -251,10 +251,14 @@ impl WorldState {
                 p.snap.shield_hp = 0;
             }
             p.snap.haste = now < p.haste_expires_at;
-            if !p.joined {
+            if !p.joined && !p.in_lobby {
                 continue;
             }
-            let ground = ground_height_at(p.snap.x, p.snap.z);
+            let ground = if p.joined {
+                ground_height_at(p.snap.x, p.snap.z)
+            } else {
+                0.0
+            };
             if p.jump_velocity != 0.0 || p.snap.y > ground {
                 p.jump_velocity -= 22.0 * dt;
                 p.snap.y = (p.snap.y + p.jump_velocity * dt).max(ground);
@@ -264,6 +268,9 @@ impl WorldState {
                 }
             } else {
                 p.snap.y = ground;
+            }
+            if !p.joined {
+                continue;
             }
             let in_plaza = sqrt_f32(p.snap.x * p.snap.x + p.snap.z * p.snap.z) < SAFE_PLAZA_RADIUS;
             if in_plaza && p.snap.hp < p.snap.max_hp {

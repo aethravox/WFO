@@ -59,6 +59,8 @@ impl MmoClientEngine {
             attack_tick: 0,
             shield_hp: 0,
             haste: false,
+            has_adventurer_card: self.offline_has_card,
+            adventurer_rank: self.offline_rank,
         };
 
         self.players.clear();

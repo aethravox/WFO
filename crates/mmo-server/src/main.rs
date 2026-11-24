@@ -5,8 +5,8 @@ use accounts::{Account, AccountStore, AuthError};
 use mmo_protocol::{
     atan2_approx, cos_approx, ground_height_at, move_with_tree_collision, sanitize_field,
     sin_approx, sqrt_f32, AdventurerRank, ChatEntry, ClassId, ClientPacket, CombatFx,
-    CrystalSnapshot, MobKind, MobSnapshot, PlayerSnapshot, ServerPacket, PLAYABLE_RADIUS,
-    SAFE_PLAZA_RADIUS,
+    CrystalSnapshot, MobKind, MobSnapshot, PlayerSnapshot, ServerPacket, GUILD_POS_X,
+    GUILD_POS_Z, PLAYABLE_RADIUS, SAFE_PLAZA_RADIUS,
 };
 use rand_core::{OsRng, RngCore};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
@@ -193,6 +193,7 @@ pub(crate) struct ServerMob {
     pub(crate) damage: i32,
     pub(crate) xp_reward: i32,
     pub(crate) gold_reward: i32,
+    pub(crate) rank_points_reward: i32,
     pub(crate) aggro_target: Option<String>,
     pub(crate) last_attack: Instant,
     pub(crate) respawn_at: Instant,

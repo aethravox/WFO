@@ -55,6 +55,8 @@ impl WorldState {
                 player.snap.xp_next = account.xp_next;
                 player.snap.gold = account.gold;
                 player.snap.rank_points = account.rank_points;
+                player.snap.has_adventurer_card = account.has_adventurer_card;
+                player.snap.adventurer_rank = account.adventurer_rank;
                 player.snap.max_hp =
                     account.class_id.base_hp() + (account.level.saturating_sub(1)) * 28;
                 player.snap.hp = player.snap.max_hp;
@@ -106,6 +108,8 @@ impl WorldState {
             player.snap.xp_next,
             player.snap.gold,
             player.snap.rank_points,
+            player.snap.has_adventurer_card,
+            player.snap.adventurer_rank,
         ) {
             eprintln!(
                 "[wfo-server] Could not persist account {}: {error}",
@@ -329,6 +333,12 @@ impl WorldState {
                     damage: dmg,
                     xp_reward: xp,
                     gold_reward: gold,
+                    rank_points_reward: match kind {
+                        MobKind::Stalker => if level >= 2 { 3 } else { 2 },
+                        MobKind::Wisp => 4,
+                        MobKind::Sentinel => 8,
+                        MobKind::Colossus => 25,
+                    },
                     aggro_target: None,
                     last_attack: now,
                     respawn_at: now,
@@ -392,18 +402,18 @@ impl WorldState {
         }
     }
 
-    pub(crate) fn grant_rewards(&mut self, player_id: &str, xp_gain: i32, gold_gain: i32) {
+    pub(crate) fn grant_rewards(
+        &mut self,
+        player_id: &str,
+        xp_gain: i32,
+        gold_gain: i32,
+        rank_points_gain: i32,
+    ) {
         let mut leveled_to: Option<i32> = None;
-        let mut rank_up: Option<AdventurerRank> = None;
         if let Some(p) = self.players.get_mut(player_id) {
-            let old_rank = AdventurerRank::from_points(p.snap.rank_points);
             p.snap.xp += xp_gain;
             p.snap.gold += gold_gain;
-            p.snap.rank_points = p.snap.rank_points.saturating_add(xp_gain.max(0));
-            let new_rank = AdventurerRank::from_points(p.snap.rank_points);
-            if new_rank > old_rank {
-                rank_up = Some(new_rank);
-            }
+            p.snap.rank_points = p.snap.rank_points.saturating_add(rank_points_gain.max(0));
             while p.snap.xp >= p.snap.xp_next {
                 p.snap.xp -= p.snap.xp_next;
                 p.snap.level += 1;
@@ -420,15 +430,6 @@ impl WorldState {
                 &ServerPacket::LevelUp {
                     id: player_id.to_string(),
                     level: lvl,
-                },
-                None,
-            );
-        }
-        if let Some(rank) = rank_up {
-            self.broadcast(
-                &ServerPacket::RankUp {
-                    id: player_id.to_string(),
-                    rank,
                 },
                 None,
             );

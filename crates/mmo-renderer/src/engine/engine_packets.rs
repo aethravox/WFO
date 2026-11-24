@@ -221,6 +221,33 @@ impl MmoClientEngine {
                     });
                 }
             }
+            ServerPacket::GuildNotice {
+                kind,
+                rank,
+                missing,
+            } => {
+                let message = match kind {
+                    0 => String::from("GREMIO: TARJETA DE AVENTURERO OTORGADA (RANGO H)"),
+                    1 => format!("GREMIO: ASCENDIDO A RANGO {}!", rank.as_code()),
+                    2 => format!(
+                        "GREMIO: FALTAN {} PR PARA RANGO {}",
+                        missing,
+                        rank.as_code()
+                    ),
+                    _ => String::from("GREMIO: YA POSEES EL RANGO MAXIMO SSS"),
+                };
+                self.guild_notice = Some((message, 4.2));
+                if kind == 0 {
+                    self.popups.push(FloatingPopup {
+                        x: self.local_x,
+                        y: self.local_y + 2.9,
+                        z: self.local_z,
+                        text: String::from("TARJETA DE AVENTURERO!"),
+                        color: 0xFBBF24,
+                        age: 0.0,
+                    });
+                }
+            }
             ServerPacket::Emote { player_id, emote } => {
                 if let Some(player) = self.players.get(&player_id) {
                     self.popups.push(FloatingPopup {

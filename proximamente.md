@@ -66,8 +66,8 @@ Ideas de mecánicas para Wayfarers Online. Esta lista sirve como catálogo para 
 54. **Portales de viaje rápido:** desplazarse entre lugares ya descubiertos.
 55. **Monturas:** recorrer el mapa más rápido.
 56. **Pruebas de movimiento:** circuitos de saltos con tiempos y recompensas.
-57. **Clima dinámico:** lluvia o niebla que cambien el ambiente y la visibilidad.
-58. **Ciclo día-noche:** modificar la iluminación y la actividad de las criaturas.
+
+
 59. **Peligros del entorno:** zonas que dañan, ralentizan o dificultan el movimiento.
 60. **Cuevas secretas:** áreas escondidas con criaturas y recompensas propias.
 61. **Mazmorras instanciadas:** zonas separadas para grupos pequeños.
@@ -76,14 +76,14 @@ Ideas de mecánicas para Wayfarers Online. Esta lista sirve como catálogo para 
 64. **Escolta de caravanas:** proteger un personaje o vehículo durante un trayecto.
 65. **Defensa de cristales:** impedir que criaturas destruyan un cristal durante un evento.
 66. **Contrarreloj:** completar un recorrido o desafío antes de que se acabe el tiempo.
-67. **Sala de entrenamiento:** practicar ataques y habilidades contra objetivos de prueba.
+
 68. **Puzles ambientales:** activar mecanismos del mundo para abrir rutas o recompensas.
 69. **Objetos interactivos de combate:** usar elementos del entorno para afectar a los enemigos.
 
 ## Objetos y personalización
 
-70. **Inventario:** organizar el equipo, materiales y consumibles recogidos.
-71. **Almacén personal:** guardar objetos para liberar espacio en el inventario.
+
+
 72. **Atributos aleatorios de equipo:** obtener piezas con combinaciones distintas de estadísticas.
 73. **Runas engarzables:** añadir efectos a armas o armaduras mediante espacios de mejora.
 74. **Bonificaciones por conjunto:** activar efectos al llevar varias piezas del mismo conjunto.
@@ -172,12 +172,10 @@ Ideas de mecánicas para Wayfarers Online. Esta lista sirve como catálogo para 
 
 141. **Animación de despertar:** una entrada visual especial al activar una transformación.
 142. **Pose de victoria:** elegir una pose que aparece al terminar ciertos combates.
-143. **Modo foto:** pausar la acción y colocar al personaje para capturar una imagen.
+
 144. **Viñetas de combate:** mostrar breves retratos o efectos visuales al ejecutar una técnica clave.
 145. **Efectos de aura personalizables:** cambiar el color y el estilo del aura.
 147. **Técnicas secretas de maestros:** encontrar NPCs especiales que enseñen habilidades ocultas.
 148. **Rumores del mundo:** hablar con personajes para descubrir criaturas o eventos secretos.
 149. **Marcas de maestría:** efectos visuales que muestran cuánto dominas una clase o habilidad.
 150. **Récords de combate:** comparar tiempos y combos con los de otros jugadores.
-
-

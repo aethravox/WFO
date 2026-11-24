@@ -137,6 +137,7 @@ impl ClientPacket {
             Self::Gather { crystal_id } => {
                 format!("GATH|{}", sanitize_field(crystal_id, 24))
             }
+            Self::GuildInteract => String::from("GUILD"),
             Self::Emote { emote } => format!("EMOTE|{}", emote.as_code()),
             Self::Chat { text } => {
                 format!("CHAT|{}", sanitize_field(text, 140))
@@ -192,6 +193,7 @@ impl ClientPacket {
             "GATH" if parts.len() >= 2 => Some(Self::Gather {
                 crystal_id: parts[1].to_string(),
             }),
+            "GUILD" => Some(Self::GuildInteract),
             "EMOTE" if parts.len() == 2 => Some(Self::Emote {
                 emote: EmoteId::from_code(parts[1])?,
             }),
@@ -266,7 +268,7 @@ impl ServerPacket {
             ),
             Self::Init { self_id } => format!("INIT|{}", self_id),
             Self::Player(p) => format!(
-                "PLR|{}|{}|{}|{:.3}|{:.3}|{:.3}|{:.3}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                "PLR|{}|{}|{}|{:.3}|{:.3}|{:.3}|{:.3}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
                 p.id,
                 sanitize_field(&p.name, 18),
                 p.class_id.as_code(),
@@ -286,7 +288,9 @@ impl ServerPacket {
                 p.attack_tick,
                 p.rank_points,
                 p.shield_hp,
-                if p.haste { 1 } else { 0 }
+                if p.haste { 1 } else { 0 },
+                if p.has_adventurer_card { 1 } else { 0 },
+                p.adventurer_rank.as_code()
             ),
             Self::Mob(m) => format!(
                 "MOB|{}|{}|{}|{:.3}|{:.3}|{:.3}|{:.3}|{}|{}|{}|{}|{}",
@@ -328,6 +332,7 @@ impl ServerPacket {
             ),
             Self::LevelUp { id, level } => format!("LVL|{}|{}", id, level),
             Self::RankUp { id, rank } => format!("RANK|{}|{}", id, rank.as_code()),
+            Self::GuildNotice { kind, rank, missing } => format!("GUILDNOTICE|{}|{}|{}", kind, rank.as_code(), missing),
             Self::Emote { player_id, emote } => {
                 format!(
                     "EMOTE|{}|{}",
@@ -419,6 +424,8 @@ impl ServerPacket {
                     0
                 },
                 haste: parts.get(20).is_some_and(|value| *value == "1"),
+                has_adventurer_card: parts.get(21).is_some_and(|value| *value == "1"),
+                adventurer_rank: parts.get(22).and_then(|value| AdventurerRank::from_code(value)).unwrap_or(AdventurerRank::H),
             })),
             "MOB" if parts.len() >= 13 => Some(Self::Mob(MobSnapshot {
                 id: parts[1].to_string(),
@@ -464,6 +471,11 @@ impl ServerPacket {
             "RANK" if parts.len() >= 3 => Some(Self::RankUp {
                 id: parts[1].to_string(),
                 rank: AdventurerRank::from_code(parts[2])?,
+            }),
+            "GUILDNOTICE" if parts.len() >= 4 => Some(Self::GuildNotice {
+                kind: parts[1].parse().ok()?,
+                rank: AdventurerRank::from_code(parts[2])?,
+                missing: parts[3].parse().ok()?,
             }),
             "EMOTE" if parts.len() >= 3 => Some(Self::Emote {
                 player_id: sanitize_field(parts[1], 24),
@@ -538,6 +550,11 @@ pub enum ServerPacket {
     RankUp {
         id: String,
         rank: AdventurerRank,
+    },
+    GuildNotice {
+        kind: u8,
+        rank: AdventurerRank,
+        missing: i32,
     },
     Emote {
         player_id: String,

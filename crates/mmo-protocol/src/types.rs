@@ -266,6 +266,22 @@ impl AdventurerRank {
             Self::SSS => None,
         }
     }
+
+    pub const fn next_rank(self) -> Option<Self> {
+        match self {
+            Self::H => Some(Self::G),
+            Self::G => Some(Self::F),
+            Self::F => Some(Self::E),
+            Self::E => Some(Self::D),
+            Self::D => Some(Self::C),
+            Self::C => Some(Self::B),
+            Self::B => Some(Self::A),
+            Self::A => Some(Self::S),
+            Self::S => Some(Self::SS),
+            Self::SS => Some(Self::SSS),
+            Self::SSS => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -377,6 +393,8 @@ pub struct PlayerSnapshot {
     pub attack_tick: u32,
     pub shield_hp: i32,
     pub haste: bool,
+    pub has_adventurer_card: bool,
+    pub adventurer_rank: AdventurerRank,
 }
 
 #[derive(Debug, Clone)]
@@ -497,6 +515,7 @@ pub enum ClientPacket {
     Gather {
         crystal_id: String,
     },
+    GuildInteract,
     Emote {
         emote: EmoteId,
     },

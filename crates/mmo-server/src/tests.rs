@@ -73,20 +73,57 @@ mod tests_inner {
                 .players
                 .get_mut(&player_id)
                 .expect("registered player");
+            player.authenticated = true;
             player.joined = true;
-            player.snap.rank_points = 90;
+            player.snap.rank_points = 80;
+            player.snap.x = GUILD_POS_X;
+            player.snap.z = GUILD_POS_Z;
 
-            world.grant_rewards(&player_id, 20, 0);
+            world.grant_rewards(&player_id, 20, 0, 10);
 
-            assert_eq!(world.players[&player_id].snap.rank_points, 110);
+            let p = &world.players[&player_id];
+            assert_eq!(p.snap.rank_points, 90);
+            assert!(!p.snap.has_adventurer_card);
+            assert_eq!(p.snap.adventurer_rank, AdventurerRank::H);
+
+            // First visit to Guild Receptionist grants the Adventurer Card (Rank H)
+            world.handle_packet(&player_id, ClientPacket::GuildInteract);
+            assert!(world.players[&player_id].snap.has_adventurer_card);
+            assert_eq!(world.players[&player_id].snap.adventurer_rank, AdventurerRank::H);
+
+            // Second visit with 90 PR (< 100 PR) reports missing 10 PR without promoting
+            world.handle_packet(&player_id, ClientPacket::GuildInteract);
+            assert_eq!(world.players[&player_id].snap.adventurer_rank, AdventurerRank::H);
+
+            // Reach 100 PR and revisit Guild Receptionist to promote to Rank G
+            world.grant_rewards(&player_id, 0, 0, 10);
+            world.handle_packet(&player_id, ClientPacket::GuildInteract);
+            assert_eq!(world.players[&player_id].snap.adventurer_rank, AdventurerRank::G);
         }
 
-        assert!(receiver.try_iter().any(|packet| matches!(
+        let packets: Vec<_> = receiver.try_iter().collect();
+        assert!(packets.iter().any(|packet| matches!(
+            packet,
+            ServerPacket::GuildNotice {
+                kind: 0,
+                rank: AdventurerRank::H,
+                missing: 0
+            }
+        )));
+        assert!(packets.iter().any(|packet| matches!(
+            packet,
+            ServerPacket::GuildNotice {
+                kind: 2,
+                rank: AdventurerRank::G,
+                missing: 10
+            }
+        )));
+        assert!(packets.iter().any(|packet| matches!(
             packet,
             ServerPacket::RankUp {
                 id,
                 rank: AdventurerRank::G
-            } if id == player_id
+            } if *id == player_id
         )));
         drop(state);
         drop(accounts);

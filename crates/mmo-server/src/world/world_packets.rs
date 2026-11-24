@@ -406,7 +406,9 @@ impl WorldState {
                     cx = cx.clamp(-11.5, 11.5);
                     cz = cz.clamp(-9.0, 9.0);
                     player.snap.x = cx;
-                    player.snap.y = 0.0;
+                    if player.jump_velocity == 0.0 {
+                        player.snap.y = 0.0;
+                    }
                     player.snap.z = cz;
                     player.snap.yaw = yaw;
                     let lobby_dx = cx - from_x;
@@ -474,8 +476,15 @@ impl WorldState {
                 let Some(player) = self.players.get_mut(player_id) else {
                     return;
                 };
-                let ground = ground_height_at(player.snap.x, player.snap.z);
-                if player.joined && player.jump_velocity == 0.0 && player.snap.y <= ground + 0.05 {
+                let ground = if player.joined {
+                    ground_height_at(player.snap.x, player.snap.z)
+                } else {
+                    0.0
+                };
+                if (player.joined || player.in_lobby)
+                    && player.jump_velocity == 0.0
+                    && player.snap.y <= ground + 0.05
+                {
                     player.snap.y = ground;
                     player.jump_velocity = 8.4;
                 }
@@ -676,6 +685,7 @@ impl WorldState {
 
                 let mut total_xp = 0;
                 let mut total_gold = 0;
+                let mut total_rank_points = 0;
                 let mut fx_list = Vec::new();
 
                 for mid in hit_ids.into_iter().take(if is_aoe { 4 } else { 1 }) {
@@ -719,6 +729,7 @@ impl WorldState {
                             gold_gained = m.gold_reward;
                             total_xp += xp_gained;
                             total_gold += gold_gained;
+                            total_rank_points += m.rank_points_reward;
                         }
                         fx_list.push(CombatFx {
                             attacker_id: player_id.to_string(),
@@ -741,8 +752,8 @@ impl WorldState {
                     }
                 }
 
-                if total_xp > 0 || total_gold > 0 {
-                    self.grant_rewards(player_id, total_xp, total_gold);
+                if total_xp > 0 || total_gold > 0 || total_rank_points > 0 {
+                    self.grant_rewards(player_id, total_xp, total_gold, total_rank_points);
                 }
                 for fx in fx_list {
                     self.broadcast(&ServerPacket::CombatFx(fx), None);
@@ -773,7 +784,7 @@ impl WorldState {
                 };
 
                 if let Some(cs) = gathered {
-                    self.grant_rewards(player_id, 22, 18);
+                    self.grant_rewards(player_id, 22, 18, 1);
                     self.broadcast(&ServerPacket::Crystal(cs.clone()), None);
                     self.broadcast(
                         &ServerPacket::CombatFx(CombatFx {
@@ -791,6 +802,95 @@ impl WorldState {
                         }),
                         None,
                     );
+                }
+            }
+            ClientPacket::GuildInteract => {
+                let Some(p) = self.players.get(player_id) else {
+                    return;
+                };
+                if !p.joined {
+                    return;
+                }
+                let dist = sqrt_f32((p.snap.x - GUILD_POS_X).powi(2) + (p.snap.z - GUILD_POS_Z).powi(2));
+                if dist > 4.5 {
+                    return;
+                }
+                enum GuildOutcome {
+                    IssuedCard(PlayerSnapshot),
+                    Promoted(AdventurerRank, PlayerSnapshot),
+                    Insufficient { needed: AdventurerRank, missing: i32 },
+                    MaxRank,
+                }
+                let outcome = {
+                    let p = self.players.get_mut(player_id).unwrap();
+                    if !p.snap.has_adventurer_card {
+                        p.snap.has_adventurer_card = true;
+                        p.snap.adventurer_rank = AdventurerRank::H;
+                        GuildOutcome::IssuedCard(p.snap.clone())
+                    } else if let Some(next_rank) = p.snap.adventurer_rank.next_rank() {
+                        let required = next_rank.threshold_points();
+                        if p.snap.rank_points >= required {
+                            p.snap.adventurer_rank = next_rank;
+                            GuildOutcome::Promoted(next_rank, p.snap.clone())
+                        } else {
+                            GuildOutcome::Insufficient {
+                                needed: next_rank,
+                                missing: required - p.snap.rank_points.max(0),
+                            }
+                        }
+                    } else {
+                        GuildOutcome::MaxRank
+                    }
+                };
+                let sink = self.players.get(player_id).map(|p| p.sink.clone());
+                match outcome {
+                    GuildOutcome::IssuedCard(snap) => {
+                        if let Some(sink) = sink {
+                            sink.send_packet(&ServerPacket::GuildNotice {
+                                kind: 0,
+                                rank: AdventurerRank::H,
+                                missing: 0,
+                            });
+                        }
+                        self.broadcast(&ServerPacket::Player(snap), None);
+                        self.persist_account(player_id);
+                    }
+                    GuildOutcome::Promoted(new_rank, snap) => {
+                        if let Some(sink) = sink {
+                            sink.send_packet(&ServerPacket::GuildNotice {
+                                kind: 1,
+                                rank: new_rank,
+                                missing: 0,
+                            });
+                        }
+                        self.broadcast(
+                            &ServerPacket::RankUp {
+                                id: player_id.to_string(),
+                                rank: new_rank,
+                            },
+                            None,
+                        );
+                        self.broadcast(&ServerPacket::Player(snap), None);
+                        self.persist_account(player_id);
+                    }
+                    GuildOutcome::Insufficient { needed, missing } => {
+                        if let Some(sink) = sink {
+                            sink.send_packet(&ServerPacket::GuildNotice {
+                                kind: 2,
+                                rank: needed,
+                                missing,
+                            });
+                        }
+                    }
+                    GuildOutcome::MaxRank => {
+                        if let Some(sink) = sink {
+                            sink.send_packet(&ServerPacket::GuildNotice {
+                                kind: 3,
+                                rank: AdventurerRank::SSS,
+                                missing: 0,
+                            });
+                        }
+                    }
                 }
             }
             ClientPacket::Chat { text } => {

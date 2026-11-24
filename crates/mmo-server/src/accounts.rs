@@ -2,7 +2,7 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use mmo_protocol::ClassId;
+use mmo_protocol::{AdventurerRank, ClassId};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
@@ -21,6 +21,8 @@ pub struct Account {
     pub xp_next: i32,
     pub gold: i32,
     pub rank_points: i32,
+    pub has_adventurer_card: bool,
+    pub adventurer_rank: AdventurerRank,
 }
 
 #[derive(Debug)]
@@ -52,20 +54,31 @@ impl AccountStore {
                 xp INTEGER NOT NULL DEFAULT 0,
                 xp_next INTEGER NOT NULL DEFAULT 100,
                 gold INTEGER NOT NULL DEFAULT 0,
-                rank_points INTEGER NOT NULL DEFAULT 0
+                rank_points INTEGER NOT NULL DEFAULT 0,
+                has_adventurer_card INTEGER NOT NULL DEFAULT 0,
+                adventurer_rank TEXT NOT NULL DEFAULT 'H'
             );",
         )?;
-        let has_rank_points = {
+        let columns: Vec<String> = {
             let mut statement = connection.prepare("PRAGMA table_info(accounts)")?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
-            columns
-                .collect::<Result<Vec<_>, _>>()?
-                .iter()
-                .any(|column| column == "rank_points")
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>, _>>()?
         };
-        if !has_rank_points {
+        if !columns.iter().any(|column| column == "rank_points") {
             connection.execute(
                 "ALTER TABLE accounts ADD COLUMN rank_points INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !columns.iter().any(|column| column == "has_adventurer_card") {
+            connection.execute(
+                "ALTER TABLE accounts ADD COLUMN has_adventurer_card INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !columns.iter().any(|column| column == "adventurer_rank") {
+            connection.execute(
+                "ALTER TABLE accounts ADD COLUMN adventurer_rank TEXT NOT NULL DEFAULT 'H'",
                 [],
             )?;
         }
@@ -143,10 +156,12 @@ impl AccountStore {
 
         connection
             .query_row(
-                "SELECT class_id, level, xp, xp_next, gold, rank_points FROM accounts WHERE id = ?1",
+                "SELECT class_id, level, xp, xp_next, gold, rank_points, has_adventurer_card, adventurer_rank FROM accounts WHERE id = ?1",
                 params![id],
                 |row| {
                     let class_code: String = row.get(0)?;
+                    let card_int: i32 = row.get(6)?;
+                    let rank_code: String = row.get(7)?;
                     Ok(Account {
                         id,
                         username: stored_username,
@@ -156,12 +171,16 @@ impl AccountStore {
                         xp_next: row.get(3)?,
                         gold: row.get(4)?,
                         rank_points: row.get(5)?,
+                        has_adventurer_card: card_int != 0,
+                        adventurer_rank: AdventurerRank::from_code(&rank_code)
+                            .unwrap_or(AdventurerRank::H),
                     })
                 },
             )
             .map_err(|error| AuthError::Storage(error.to_string()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn save_progress(
         &self,
         account_id: i64,
@@ -171,6 +190,8 @@ impl AccountStore {
         xp_next: i32,
         gold: i32,
         rank_points: i32,
+        has_adventurer_card: bool,
+        adventurer_rank: AdventurerRank,
     ) -> Result<(), String> {
         let connection = self
             .connection
@@ -179,8 +200,8 @@ impl AccountStore {
         connection
             .execute(
                 "UPDATE accounts
-             SET class_id = ?1, level = ?2, xp = ?3, xp_next = ?4, gold = ?5, rank_points = ?6
-             WHERE id = ?7",
+             SET class_id = ?1, level = ?2, xp = ?3, xp_next = ?4, gold = ?5, rank_points = ?6, has_adventurer_card = ?7, adventurer_rank = ?8
+             WHERE id = ?9",
                 params![
                     class_id.as_code(),
                     level,
@@ -188,6 +209,8 @@ impl AccountStore {
                     xp_next,
                     gold,
                     rank_points.max(0),
+                    if has_adventurer_card { 1 } else { 0 },
+                    adventurer_rank.as_code(),
                     account_id
                 ],
             )
@@ -228,7 +251,17 @@ mod tests {
                 .authenticate("Test_User", "correct horse battery", true)
                 .expect("register test account");
             store
-                .save_progress(account.id, ClassId::Arcanist, 4, 25, 300, 90, 1_234)
+                .save_progress(
+                    account.id,
+                    ClassId::Arcanist,
+                    4,
+                    25,
+                    300,
+                    90,
+                    1_234,
+                    true,
+                    AdventurerRank::D,
+                )
                 .expect("save progression");
             assert!(matches!(
                 store.authenticate("test_user", "another password", false),
@@ -249,6 +282,8 @@ mod tests {
             (4, 25, 300, 90)
         );
         assert_eq!(account.rank_points, 1_234);
+        assert!(account.has_adventurer_card);
+        assert_eq!(account.adventurer_rank, AdventurerRank::D);
         drop(store);
         std::fs::remove_file(path).expect("remove test database");
     }
@@ -285,6 +320,8 @@ mod tests {
             .authenticate("Fresh_User", "correct horse battery", true)
             .expect("register account with migrated schema");
         assert_eq!(account.rank_points, 0);
+        assert!(!account.has_adventurer_card);
+        assert_eq!(account.adventurer_rank, AdventurerRank::H);
         drop(store);
         std::fs::remove_file(path).expect("remove test database");
     }
