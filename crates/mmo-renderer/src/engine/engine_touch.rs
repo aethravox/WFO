@@ -11,16 +11,10 @@ impl MmoClientEngine {
                 let joy_zone_max_x = (w / 2 - 42).max(126);
                 let joy_zone_min_y = (h / 2 - 36).max(108);
                 let joy_zone_max_y = if w < 680 { h - 108 } else { h - 68 };
-                if self.input.joy_pointer.is_none()
-                    && x <= joy_zone_max_x
-                    && y >= joy_zone_min_y
-                    && y <= joy_zone_max_y
-                {
-                    let min_oy = joy_zone_min_y + 24;
-                    let max_oy = (joy_zone_max_y - 24).max(min_oy);
+                if self.input.joy_pointer.is_none() && x <= w / 2 && y >= 40 && y <= h - 40 {
                     self.input.joy_pointer = Some(id);
-                    self.input.joy_origin_x = x.clamp(58, (joy_zone_max_x - 24).max(58));
-                    self.input.joy_origin_y = y.clamp(min_oy, max_oy);
+                    self.input.joy_origin_x = x.clamp(58, (w / 2 - 24).max(58));
+                    self.input.joy_origin_y = y.clamp(80, (h - 80).max(80));
                     self.update_joystick(x, y);
                     return;
                 }
