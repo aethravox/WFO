@@ -41,22 +41,15 @@ impl MmoClientEngine {
             );
             Camera::look_at(cam_pos, target, self.fb.width)
         } else {
+            let focus_y = 1.0;
             let horiz = cos_approx(self.cam_pitch) * self.cam_dist;
             let vert = sin_approx(self.cam_pitch) * self.cam_dist;
-            let mut cx = self.local_x + sin_approx(self.cam_yaw) * horiz;
-            let mut cz = self.local_z + cos_approx(self.cam_yaw) * horiz;
-            cx = cx.clamp(-11.8, 11.8);
-            cz = cz.clamp(-9.3, 9.3);
-            let focus_y = self.local_y + 1.5;
-            let ideal_y = focus_y + vert;
-            let min_cam_y = 0.55;
-            let (cam_y, target_y) = if ideal_y < min_cam_y {
-                (min_cam_y, min_cam_y - vert)
-            } else {
-                (ideal_y, focus_y)
-            };
-            let cam_pos = Vec3::new(cx, cam_y, cz);
-            let target = Vec3::new(self.local_x, target_y, self.local_z);
+            let cam_pos = Vec3::new(
+                self.local_x + sin_approx(self.cam_yaw) * horiz,
+                focus_y + vert.max(0.4),
+                self.local_z + cos_approx(self.cam_yaw) * horiz,
+            );
+            let target = Vec3::new(self.local_x, focus_y, self.local_z);
             Camera::look_at(cam_pos, target, self.fb.width)
         }
     }
