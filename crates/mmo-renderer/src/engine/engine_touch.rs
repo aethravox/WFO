@@ -24,13 +24,26 @@ impl MmoClientEngine {
                     self.update_joystick(x, y);
                     return;
                 }
+                if x >= w - 92 && x <= w - 16 && y >= h - 210 && y <= h - 164 {
+                    self.trigger_jump();
+                    return;
+                }
+                if x >= w - 174 && x <= w - 102 && y >= h - 156 && y <= h - 110 {
+                    self.trigger_dodge();
+                    return;
+                }
                 if x >= w - 92 && x <= w - 16 && y >= h - 156 && y <= h - 110 {
                     self.trigger_gather();
                     return;
                 }
             }
         } else {
-            // Utility buttons (marker, bestiary and emotes)
+            let compact_actions = w < 680;
+            let bar_x = (w - if compact_actions { 208 } else { 280 }) / 2;
+            let bar_y = h - 68;
+            let bar_w = if compact_actions { 208 } else { 280 };
+
+            // Utility buttons
             let jbx = w - 88;
             if x >= jbx && x <= jbx + 72 && y >= h - 296 && y <= h - 250 {
                 self.toggle_personal_marker();
@@ -62,9 +75,7 @@ impl MmoClientEngine {
                 }
             }
 
-            // Virtual joystick floating zone (left half, clear of bottom action bar)
-            let compact_actions = w < 680;
-            let bar_x = (w - if compact_actions { 208 } else { 280 }) / 2;
+            // Virtual joystick
             let joy_zone_max_x = (bar_x - 10).max(120);
             let joy_zone_min_y = (h / 2 - 36).max(114);
             let joy_zone_max_y = (h - 74).max(joy_zone_min_y + 40);
@@ -82,27 +93,25 @@ impl MmoClientEngine {
                 return;
             }
 
-            // Compact touch chat button
+            // Compact chat button
             if x >= w - 88 && x <= w - 16 && y >= h - 188 && y <= h - 142 {
                 self.chat_focused = !self.chat_focused;
                 return;
             }
 
-            // Virtual Jump button (right side)
+            // Jump button
             if x >= w - 88 && x <= w - 16 && y >= h - 134 && y <= h - 88 {
                 self.trigger_jump();
                 return;
             }
 
-            // Virtual Dodge button (next to Jump)
+            // Dodge button
             if x >= w - 160 && x <= w - 96 && y >= h - 134 && y <= h - 88 {
                 self.trigger_dodge();
                 return;
             }
 
-            // Bottom-Center Action Bar (1, 2, 3, E/MINAR) for multi-touch taps
-            let bar_w = if compact_actions { 208 } else { 280 };
-            let bar_y = h - 68;
+            // Action bar
             if y >= bar_y && y <= bar_y + 52 && x >= bar_x && x <= bar_x + bar_w {
                 let slot = if compact_actions {
                     (x - bar_x - 6) / 50
@@ -180,7 +189,6 @@ impl MmoClientEngine {
         if self.input.cam_pointer == Some(id) {
             self.input.cam_pointer = None;
             if self.input.cam_drag_dist < 22 {
-                // Emulate click at tap point with forgiving mobile thumb jitter tolerance
                 self.input.dragging = true;
                 self.input.drag_dist = 0;
                 self.on_pointer_up(x, y);
