@@ -158,10 +158,8 @@ impl MmoClientEngine {
             self.input.cam_drag_dist += dx.abs() + dy.abs();
             self.input.cam_last_x = x;
             self.input.cam_last_y = y;
-            if self.joined {
-                self.cam_yaw -= (dx as f32) * 0.007;
-                self.cam_pitch = clamp_f32(self.cam_pitch + (dy as f32) * 0.0055, 0.14, 1.08);
-            }
+            self.cam_yaw -= (dx as f32) * 0.007;
+            self.cam_pitch = clamp_f32(self.cam_pitch + (dy as f32) * 0.0055, -0.58, 1.18);
         }
     }
 
