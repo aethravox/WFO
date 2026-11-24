@@ -7,10 +7,8 @@ impl MmoClientEngine {
         let h = self.fb.height as i32;
 
         if !self.joined {
-            if self.account_authenticated || !self.auth_panel_open {
-                let joy_zone_max_x = (w / 2 - 42).max(126);
-                let joy_zone_min_y = (h / 2 - 36).max(108);
-                let joy_zone_max_y = if w < 680 { h - 108 } else { h - 68 };
+            let panel_active = self.auth_panel_open && !self.account_authenticated;
+            if !panel_active {
                 if self.input.joy_pointer.is_none() && x <= w / 2 && y >= 40 && y <= h - 40 {
                     self.input.joy_pointer = Some(id);
                     self.input.joy_origin_x = x.clamp(58, (w / 2 - 24).max(58));
@@ -28,6 +26,11 @@ impl MmoClientEngine {
                 }
                 if x >= w - 92 && x <= w - 16 && y >= h - 156 && y <= h - 110 {
                     self.trigger_gather();
+                    return;
+                }
+            } else {
+                // If auth panel is open, let touches on left side interact or not capture camera drag inadvertently
+                if x <= w / 2 {
                     return;
                 }
             }
